@@ -1,0 +1,19 @@
+{
+  "_comment": "ccc-agent runtime config. Install (root-owned, world-readable) at /etc/ccc-agent/config.json or /opt/ccc-agent/config/config.json. The agent must never be able to write this file or anything under state_dir.",
+  "state_dir": "/storage/user/.ccc-agent",
+  "backend": "branchfs",
+  "branchfs_bin": "/opt/ccc-agent/bin/branchfs",
+  "user": "domen",
+  "home_subdir": "",
+  "roots": [
+    {
+      "name": "storage_user",
+      "base": "/__real/storage_user",
+      "store": "/__branchfs_store/storage_user",
+      "visible": "/storage/user",
+      "home_subdir": "",
+      "hide_paths": [".ssh", ".gnupg", ".netrc", ".aws", ".kube", ".docker/config.json", ".ccc-agent"]
+    }
+  ],
+  "hide_patterns": [".env", ".env.*", "*.pem", "id_rsa*", "id_ed25519*", "credentials.json"]
+}
