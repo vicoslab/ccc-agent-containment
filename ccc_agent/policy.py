@@ -1,0 +1,207 @@
+"""Change classification and commit decision for agent branch sessions.
+
+The supervisor freezes a session's branches, collects BranchFS status, and
+asks this module what to do.  The agent never runs this code path with commit
+authority; the decision is enforced by the trusted supervisor.
+"""
+
+import fnmatch
+import posixpath
+
+from .paths import is_within
+
+# Decision constants (stable strings: they are written into review artifacts).
+AUTO_COMMIT = "auto-commit"
+PENDING_REVIEW = "pending-review"
+ABORT = "abort"
+NO_CHANGES = "no-changes"
+
+MODES = (
+    "manual",          # always require human review before commit
+    "workspace-auto",  # auto-commit iff confined to allowed scopes, no deny hit
+    "read-only-review",  # freeze and report, never auto-commit
+    "training-run",    # like workspace-auto; scopes = declared artifact dirs
+    "throwaway",       # abort at completion unless human preserves explicitly
+)
+
+# Paths that force review even when inside the allowed workspace.  Component
+# patterns (no '/') match any single path segment; slashed patterns match the
+# segment sequence anywhere in the path plus everything below it.
+DEFAULT_DENY_PATTERNS = (
+    ".ssh",
+    ".gnupg",
+    ".env",
+    ".env.*",
+    "*.pem",
+    "id_rsa*",
+    "id_ed25519*",
+    "id_ecdsa*",
+    ".netrc",
+    ".aws",
+    ".kube/config",
+    ".docker/config.json",
+    "credentials.json",
+    ".git/config",
+    ".git/hooks",
+    ".bashrc",
+    ".bash_profile",
+    ".profile",
+    ".zshrc",
+    ".condarc",
+    ".ccc-agent",  # session/policy/review state must never be agent-writable
+)
+
+
+def path_matches(pattern, path):
+    """Glob match for deny/hide rules against a canonical absolute path.
+
+    - ``pattern`` without ``/``: matches if any single path component matches
+      (``.env``, ``id_rsa*``, ``*.pem``).
+    - ``pattern`` with ``/`` and no leading ``/``: matches that component
+      sequence anywhere in the path, and everything below it
+      (``.git/hooks`` matches ``a/.git/hooks`` and ``a/.git/hooks/pre-commit``).
+    - absolute ``pattern``: plain fnmatch against the whole path, plus
+      everything below a matched directory.
+    """
+    if "/" not in pattern:
+        parts = path.strip("/").split("/")
+        return any(fnmatch.fnmatchcase(part, pattern) for part in parts)
+    pat = pattern if pattern.startswith("/") else "*/" + pattern
+    return (fnmatch.fnmatchcase(path, pat)
+            or fnmatch.fnmatchcase(path, pat + "/*"))
+
+
+class Change(object):
+    """One changed path from BranchFS status, in agent-visible terms."""
+
+    __slots__ = ("op", "path", "kind", "bytes", "root")
+
+    def __init__(self, op, path, kind="file", bytes=0, root=""):
+        self.op = op        # "A" added | "M" modified | "D" deleted
+        self.path = path    # absolute agent-visible path
+        self.kind = kind    # file | dir | symlink
+        self.bytes = bytes
+        self.root = root    # protected-root name, e.g. "storage_user"
+
+    def to_dict(self):
+        return {"op": self.op, "path": self.path, "kind": self.kind,
+                "bytes": self.bytes, "root": self.root}
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(op=data["op"], path=data["path"],
+                   kind=data.get("kind", "file"), bytes=data.get("bytes", 0),
+                   root=data.get("root", ""))
+
+
+class DenyMatch(object):
+    __slots__ = ("path", "pattern")
+
+    def __init__(self, path, pattern):
+        self.path = path
+        self.pattern = pattern
+
+    def to_dict(self):
+        return {"path": self.path, "pattern": self.pattern}
+
+
+class PolicyConfig(object):
+    def __init__(self, mode, allowed_scopes=(), deny_patterns=None,
+                 hide_patterns=(), max_policy_repair_attempts=2):
+        if mode not in MODES:
+            raise ValueError("unknown policy mode %r (expected one of %s)"
+                             % (mode, ", ".join(MODES)))
+        self.mode = mode
+        self.allowed_scopes = list(allowed_scopes)
+        self.deny_patterns = (list(DEFAULT_DENY_PATTERNS)
+                              if deny_patterns is None else list(deny_patterns))
+        self.hide_patterns = list(hide_patterns)
+        self.max_policy_repair_attempts = max_policy_repair_attempts
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(
+            mode=data["mode"],
+            allowed_scopes=data.get("allowed_scopes", ()),
+            deny_patterns=data.get("deny_patterns"),
+            hide_patterns=data.get("hide_patterns", ()),
+            max_policy_repair_attempts=data.get("max_policy_repair_attempts", 2),
+        )
+
+    def to_dict(self):
+        return {
+            "mode": self.mode,
+            "allowed_scopes": self.allowed_scopes,
+            "deny_patterns": self.deny_patterns,
+            "hide_patterns": self.hide_patterns,
+            "max_policy_repair_attempts": self.max_policy_repair_attempts,
+        }
+
+
+class PolicyDecision(object):
+    def __init__(self, decision, total_changes, out_of_scope, deny_matches,
+                 reasons):
+        self.decision = decision
+        self.total_changes = total_changes
+        self.out_of_scope = out_of_scope        # canonical paths
+        self.deny_matches = deny_matches        # [DenyMatch]
+        self.reasons = reasons                  # human-readable strings
+
+    def to_dict(self):
+        return {
+            "decision": self.decision,
+            "total_changes": self.total_changes,
+            "out_of_scope": self.out_of_scope,
+            "deny_matches": [m.to_dict() for m in self.deny_matches],
+            "reasons": self.reasons,
+        }
+
+
+def classify(changes, config, alias_map):
+    """Return (out_of_scope, deny_matches) for the change set, canonicalized."""
+    scopes = [alias_map.canonicalize(s) for s in config.allowed_scopes]
+    deny = list(config.deny_patterns) + list(config.hide_patterns)
+    out_of_scope = []
+    deny_matches = []
+    for change in changes:
+        canonical = alias_map.canonicalize(change.path)
+        if not any(is_within(canonical, scope) for scope in scopes):
+            out_of_scope.append(canonical)
+        for pattern in deny:
+            if path_matches(pattern, canonical):
+                deny_matches.append(DenyMatch(change.path, pattern))
+                break
+    return out_of_scope, deny_matches
+
+
+def evaluate(changes, config, alias_map):
+    """Decide what to do with a frozen session's change set."""
+    if not changes:
+        return PolicyDecision(NO_CHANGES, 0, [], [],
+                              ["branch contains no changes"])
+
+    out_of_scope, deny_matches = classify(changes, config, alias_map)
+    reasons = []
+    if out_of_scope:
+        reasons.append("%d change(s) outside allowed scopes" % len(out_of_scope))
+    if deny_matches:
+        reasons.append("%d change(s) matched deny/hide patterns"
+                       % len(deny_matches))
+
+    if config.mode == "throwaway":
+        reasons.append("throwaway mode aborts at completion")
+        decision = ABORT
+    elif config.mode in ("manual", "read-only-review"):
+        reasons.append("%s mode always requires human review" % config.mode)
+        decision = PENDING_REVIEW
+    elif config.mode in ("workspace-auto", "training-run"):
+        if not out_of_scope and not deny_matches:
+            reasons.append("all changes confined to allowed scopes")
+            decision = AUTO_COMMIT
+        else:
+            decision = PENDING_REVIEW
+    else:  # unreachable: constructor validates mode
+        raise ValueError("unknown policy mode %r" % config.mode)
+
+    return PolicyDecision(decision, len(changes), out_of_scope, deny_matches,
+                          reasons)
