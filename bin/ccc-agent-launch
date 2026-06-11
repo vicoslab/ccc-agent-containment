@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Shim entrypoint: like ccc-agent-run, but defaults workspace to $PWD.
+
+Binary shims call this as:
+    ccc-agent-launch --agent codex -- codex.real ...
+Nested invocations (CCC_AGENT_SESSION already set) reuse the outer session.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from ccc_agent.cli import main_run
+
+if __name__ == "__main__":
+    sys.exit(main_run(sys.argv[1:]))
