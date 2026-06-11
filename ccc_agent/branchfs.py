@@ -57,14 +57,22 @@ class BranchfsCli(object):
         return out
 
     def start_daemon(self, root):
+        # Idempotent: the daemon auto-exits when its last mount goes away,
+        # so every daemon-dependent operation re-ensures it first (e.g.
+        # `ccc-agentctl commit` long after the agent session unmounted).
         self._invoke("start-daemon", "--base", root.base,
                      "--storage", root.store)
 
     def create_branch(self, root, parent="main"):
-        self._invoke("create", root.branch, "--parent", parent,
-                     "--storage", root.store)
+        self.start_daemon(root)
+        argv = ["create", root.branch, "--parent", parent,
+                "--storage", root.store]
+        for hidden in getattr(root, "hide_paths", None) or ():
+            argv.extend(["--hide", hidden])
+        self._invoke(*argv)
 
     def mount(self, root, agent=True):
+        self.start_daemon(root)
         argv = ["mount", "--storage", root.store, "--branch", root.branch]
         if agent:
             argv.append("--agent")
@@ -75,12 +83,15 @@ class BranchfsCli(object):
         self._invoke("unmount", root.mount, "--storage", root.store)
 
     def freeze(self, root):
+        self.start_daemon(root)
         self._invoke("freeze", root.branch, "--storage", root.store)
 
     def thaw(self, root):
+        self.start_daemon(root)
         self._invoke("thaw", root.branch, "--storage", root.store)
 
     def status(self, root):
+        self.start_daemon(root)
         out = self._invoke("status", root.branch, "--storage", root.store,
                            "--json")
         try:
@@ -90,9 +101,11 @@ class BranchfsCli(object):
         return _changes_from_status(data, root)
 
     def commit(self, root):
+        self.start_daemon(root)
         self._invoke("commit-branch", root.branch, "--storage", root.store)
 
     def abort(self, root):
+        self.start_daemon(root)
         self._invoke("abort-branch", root.branch, "--storage", root.store)
 
 

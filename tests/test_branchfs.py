@@ -79,17 +79,30 @@ class TestBranchfsCli(unittest.TestCase):
         runner = RecordingRunner()
         cli = BranchfsCli(run=runner)
         cli.create_branch(self.root)
-        call = runner.calls[0]
+        # daemon-dependent ops re-ensure the daemon first
+        self.assertEqual(runner.calls[0][1], "start-daemon")
+        call = runner.calls[-1]
         self.assertEqual(call[1], "create")
         self.assertIn(self.root.branch, call)
         # supervisor creates branches without any mounted view
         self.assertNotIn(self.root.mount, call)
 
+    def test_create_branch_passes_hide_paths(self):
+        runner = RecordingRunner()
+        cli = BranchfsCli(run=runner)
+        self.root.hide_paths = [".ssh", ".netrc"]
+        cli.create_branch(self.root)
+        call = runner.calls[-1]
+        self.assertEqual(call[1], "create")
+        self.assertEqual(call.count("--hide"), 2)
+        self.assertIn(".ssh", call)
+        self.assertIn(".netrc", call)
+
     def test_mount_agent_view(self):
         runner = RecordingRunner()
         cli = BranchfsCli(run=runner)
         cli.mount(self.root, agent=True)
-        call = runner.calls[0]
+        call = runner.calls[-1]
         self.assertEqual(call[1], "mount")
         self.assertIn("--agent", call)
         self.assertIn("--branch", call)
@@ -100,13 +113,13 @@ class TestBranchfsCli(unittest.TestCase):
         runner = RecordingRunner()
         cli = BranchfsCli(run=runner)
         cli.mount(self.root, agent=False)
-        self.assertNotIn("--agent", runner.calls[0])
+        self.assertNotIn("--agent", runner.calls[-1])
 
     def test_status_parses_changes_into_visible_namespace(self):
         runner = RecordingRunner(outputs={"status": json.dumps(STATUS_JSON)})
         cli = BranchfsCli(run=runner)
         changes = cli.status(self.root)
-        self.assertIn("--json", runner.calls[0])
+        self.assertIn("--json", runner.calls[-1])
         by_path = {c.path: c for c in changes}
         added = by_path["/storage/user/Projects/proj-a/new.py"]
         self.assertEqual(added.op, "M")
@@ -128,8 +141,9 @@ class TestBranchfsCli(unittest.TestCase):
         cli = BranchfsCli(run=runner)
         cli.commit(self.root)
         cli.abort(self.root)
-        self.assertEqual(runner.calls[0][1], "commit-branch")
-        self.assertEqual(runner.calls[1][1], "abort-branch")
+        subcommands = [c[1] for c in runner.calls]
+        self.assertEqual(subcommands, ["start-daemon", "commit-branch",
+                                       "start-daemon", "abort-branch"])
 
 
 class TestFakeBranchFS(unittest.TestCase):

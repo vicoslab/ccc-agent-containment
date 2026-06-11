@@ -29,16 +29,18 @@ ENV_STATE_DIR = "CCC_AGENT_STATE_DIR"
 class RootSpec(object):
     """Template for one protected root; branch/mount are filled per session."""
 
-    __slots__ = ("name", "base", "store", "visible", "home_subdir", "mount")
+    __slots__ = ("name", "base", "store", "visible", "home_subdir", "mount",
+                 "hide_paths")
 
     def __init__(self, name, base, store, visible, home_subdir=None,
-                 mount=None):
+                 mount=None, hide_paths=()):
         self.name = name
         self.base = base
         self.store = store
         self.visible = visible
         self.home_subdir = home_subdir
         self.mount = mount  # default: <state>/mounts/<session>/<name>
+        self.hide_paths = list(hide_paths)
 
     def materialize(self, session_id, state_dir):
         mount = self.mount or os.path.join(state_dir, "mounts", session_id,
@@ -46,7 +48,8 @@ class RootSpec(object):
         return ProtectedRoot(name=self.name, base=self.base, store=self.store,
                              branch=session_id, mount=mount,
                              visible=self.visible,
-                             home_subdir=self.home_subdir)
+                             home_subdir=self.home_subdir,
+                             hide_paths=self.hide_paths)
 
 
 class RunnerConfig(object):

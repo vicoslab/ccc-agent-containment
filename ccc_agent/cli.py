@@ -71,7 +71,8 @@ def build_runtime(config):
     roots = [RootSpec(name=r["name"], base=r["base"], store=r["store"],
                       visible=r["visible"],
                       home_subdir=r.get("home_subdir"),
-                      mount=r.get("mount"))
+                      mount=r.get("mount"),
+                      hide_paths=r.get("hide_paths", ()))
              for r in config.get("roots", ())]
     if not roots:
         raise SystemExit("ccc-agent: config defines no protected roots")

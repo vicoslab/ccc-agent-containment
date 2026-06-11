@@ -61,10 +61,10 @@ class ProtectedRoot(object):
     """One protected writable CCC root covered by a BranchFS branch."""
 
     __slots__ = ("name", "base", "store", "branch", "mount", "visible",
-                 "home_subdir")
+                 "home_subdir", "hide_paths")
 
     def __init__(self, name, base, store, branch, mount, visible,
-                 home_subdir=None):
+                 home_subdir=None, hide_paths=()):
         self.name = name          # e.g. "storage_user"
         self.base = base          # real underlay, e.g. /__real/storage_user
         self.store = store        # BranchFS delta/metadata store
@@ -72,11 +72,14 @@ class ProtectedRoot(object):
         self.mount = mount        # BranchFS mountpoint (trusted-side)
         self.visible = visible    # agent-visible path, e.g. /storage/user
         self.home_subdir = home_subdir  # set on the root that backs /home
+        # literal relative paths masked from the agent view at the BranchFS
+        # level (e.g. ".ssh", ".netrc"); patterns belong in policy, not here
+        self.hide_paths = list(hide_paths)
 
     def to_dict(self):
         data = {"name": self.name, "base": self.base, "store": self.store,
                 "branch": self.branch, "mount": self.mount,
-                "visible": self.visible}
+                "visible": self.visible, "hide_paths": self.hide_paths}
         if self.home_subdir is not None:
             data["home_subdir"] = self.home_subdir
         return data
@@ -86,7 +89,8 @@ class ProtectedRoot(object):
         return cls(name=data["name"], base=data["base"], store=data["store"],
                    branch=data["branch"], mount=data["mount"],
                    visible=data["visible"],
-                   home_subdir=data.get("home_subdir"))
+                   home_subdir=data.get("home_subdir"),
+                   hide_paths=data.get("hide_paths", ()))
 
 
 class Session(object):
