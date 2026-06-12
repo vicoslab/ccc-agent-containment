@@ -24,8 +24,11 @@ inspect, commit, or abort them. This holds because:
    socket;
 3. session state (`<state_dir>/sessions`, `reviews`) is outside the view and
    additionally covered by the `.ccc-agent` deny pattern;
-4. hooks invoke `ccc-agentctl finish-turn` which records an event — there is
-   no hook path that commits.
+4. hooks invoke `ccc-agentctl finish-turn` (records an event) and
+   `ccc-agentctl check-before-final` (reads live status; exit 2 asks the
+   agent to revert policy violations, bounded by
+   `max_policy_repair_attempts`) — there is no hook path that freezes or
+   commits.
 
 ## Session lifecycle (process-exit completion, first milestone)
 
@@ -37,8 +40,10 @@ created -> mounting -> running -> finalizing -> frozen
 - `ccc-agent-run` materializes one branch per protected root (branch name =
   session id), mounts agent views, runs the command with
   `CCC_AGENT_SESSION` set, and finalizes on exit.
-- Freeze happens **after** completion (never before bounded self-repair, when
-  that lands), then `branchfs status --json` per root feeds the policy engine.
+- Freeze happens **after** completion — and, for harnesses with blocking
+  Stop hooks, after the bounded self-repair loop (`check-before-final`) has
+  allowed the stop — then `branchfs status --json` per root feeds the policy
+  engine.
 - `pending-review` keeps branches frozen; the branchfs daemon may exit (it
   auto-exits with its last mount) — `ccc-agentctl commit/abort` re-ensures it
   from session metadata (`branchfs start-daemon --base ... --storage ...`).

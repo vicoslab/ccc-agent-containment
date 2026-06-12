@@ -1,16 +1,23 @@
 """Operator/hook control surface over branch sessions (ccc-agentctl).
 
-Hooks are *reporters*: ``finish-turn`` only records lifecycle events.  Commit
-authority stays here, in trusted supervisor code, behind explicit operator
-commands (or the runner's policy decision).
+Hooks are *reporters*: ``finish-turn`` only records lifecycle events, and
+``check-before-final`` only reads live status to drive bounded self-repair.
+Commit authority stays here, in trusted supervisor code, behind explicit
+operator commands (or the runner's policy decision).
 """
 
 import json
 import os
 import sys
 
+from .policy import PolicyConfig, classify
 from .runner import finalize_session
 from .session import TERMINAL_STATES
+
+# check-before-final outcomes (stable strings for hook adapters and logs)
+CHECK_ALLOW = "allow"          # change set clean: finish normally
+CHECK_REPAIR = "repair"        # dirty, budget left: agent should revert
+CHECK_EXHAUSTED = "exhausted"  # dirty, budget spent: defer to human review
 
 
 class ControlError(Exception):
@@ -142,3 +149,65 @@ class Controller(object):
         session.add_event("turn-finished")
         self.store.save(session)
         return session
+
+    def check_before_final(self, session_id, out=None):
+        """Hook entrypoint (blocking Stop hooks): bounded self-repair check.
+
+        Classifies *live* branch status against the session policy — no
+        freeze, commit, or abort.  A dirty change set consumes one unit of
+        the per-session repair budget and the offending paths are printed
+        for the agent to revert; once the budget is spent the check stands
+        aside and finalize parks the session for human review.  Policy
+        *mode* (manual/read-only-review/...) is applied at finalize, not
+        here: this check is only about scope and deny/hide hygiene.
+        """
+        out = out or sys.stdout
+        session = self._load(session_id)
+        self._require_state(session, ("running",), "check-before-final")
+
+        config = PolicyConfig.from_dict(session.policy)
+        changes = []
+        for _name, root in sorted(session.protected_roots.items()):
+            changes.extend(self.backend.status(root))
+        out_of_scope, deny_matches = classify(changes, config, self.alias_map)
+
+        if not out_of_scope and not deny_matches:
+            session.add_event("check-clean",
+                              "%d change(s), all in scope" % len(changes))
+            self.store.save(session)
+            out.write("clean: %d change(s), all within policy\n"
+                      % len(changes))
+            return CHECK_ALLOW
+
+        if session.repair_attempts >= config.max_policy_repair_attempts:
+            session.add_event(
+                "repair-budget-exhausted",
+                "%d/%d attempts used; deferring to review at finalize"
+                % (session.repair_attempts,
+                   config.max_policy_repair_attempts))
+            self.store.save(session)
+            out.write(
+                "repair budget exhausted (%d attempt(s)); changes will be "
+                "frozen for human review at finalize\n"
+                % session.repair_attempts)
+            return CHECK_EXHAUSTED
+
+        session.repair_attempts += 1
+        session.add_event(
+            "repair-requested",
+            "attempt %d/%d: %d out-of-scope, %d deny match(es)"
+            % (session.repair_attempts, config.max_policy_repair_attempts,
+               len(out_of_scope), len(deny_matches)))
+        self.store.save(session)
+
+        out.write("policy violations; revert these before finishing "
+                  "(attempt %d/%d):\n"
+                  % (session.repair_attempts,
+                     config.max_policy_repair_attempts))
+        for path in out_of_scope:
+            out.write("  out-of-scope: %s\n" % path)
+        for match in deny_matches:
+            out.write("  deny-pattern %s: %s\n" % (match.pattern, match.path))
+        out.write("undo the listed changes (restore original content, or "
+                  "delete files you created), then finish again.\n")
+        return CHECK_REPAIR

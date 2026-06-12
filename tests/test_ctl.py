@@ -10,7 +10,7 @@ from ccc_agent import ctl
 from ccc_agent.branchfs import FakeBranchFS
 from ccc_agent.paths import AliasMap
 from ccc_agent.runner import RootSpec, RunnerConfig, run_session
-from ccc_agent.session import SessionStore
+from ccc_agent.session import ProtectedRoot, SessionStore
 
 
 class CtlHarness(object):
@@ -40,6 +40,30 @@ class CtlHarness(object):
     def controller(self):
         return ctl.Controller(store=self.store, backend=self.backend,
                               alias_map=self.alias_map)
+
+    def running_session(self, mode="workspace-auto", branch="agent-live",
+                        max_repair_attempts=2):
+        """A mounted session parked in `running`, like a launcher mid-run."""
+        root = ProtectedRoot(
+            name="storage_user", base=self.base,
+            store=os.path.join(self.tmp, "stores", "storage_user"),
+            branch=branch, mount=os.path.join(self.tmp, "mounts", branch),
+            visible="/storage/user", home_subdir="")
+        session = self.store.create(
+            owner="domen", agent_kind="hermes-gateway",
+            agent_command=["hermes", "serve"],
+            workspace="/home/domen/Projects/proj-a",
+            policy={"mode": mode,
+                    "allowed_scopes": ["/home/domen/Projects/proj-a"],
+                    "max_policy_repair_attempts": max_repair_attempts},
+            protected_roots={"storage_user": root}, completion="manual")
+        self.backend.start_daemon(root)
+        self.backend.create_branch(root)
+        self.backend.mount(root)
+        session.transition("mounting")
+        session.transition("running")
+        self.store.save(session)
+        return session, root
 
 
 class TestController(unittest.TestCase):
@@ -106,39 +130,107 @@ class TestController(unittest.TestCase):
 
     def test_finish_finalizes_running_session(self):
         # simulate a long-running session that a hook/human finishes
-        store = self.h.store
-        backend = self.h.backend
-        from ccc_agent.session import ProtectedRoot
-        root = ProtectedRoot(
-            name="storage_user", base=self.h.base,
-            store=os.path.join(self._tmp.name, "stores", "storage_user"),
-            branch="agent-longrun", mount=os.path.join(self._tmp.name,
-                                                       "mounts", "longrun"),
-            visible="/storage/user", home_subdir="")
-        session = store.create(
-            owner="domen", agent_kind="hermes-gateway",
-            agent_command=["hermes", "serve"],
-            workspace="/home/domen/Projects/proj-a",
-            policy={"mode": "workspace-auto",
-                    "allowed_scopes": ["/home/domen/Projects/proj-a"]},
-            protected_roots={"storage_user": root}, completion="manual")
-        backend.start_daemon(root)
-        backend.create_branch(root)
-        backend.mount(root)
+        session, root = self.h.running_session(branch="agent-longrun")
         with open(os.path.join(root.mount, "served.txt"), "w") as fh:
             fh.write("output\n")
-        # walk the session into running state like a launcher would
-        session.transition("mounting")
-        session.transition("running")
-        store.save(session)
 
         self.h.controller().finish(session.session_id)
-        reloaded = store.load(session.session_id)
+        reloaded = self.h.store.load(session.session_id)
         self.assertEqual(reloaded.state, "pending-review")
 
     def test_unknown_session_raises(self):
         with self.assertRaises(ctl.ControlError):
             self.h.controller().show("agent-missing")
+
+
+class TestCheckBeforeFinal(unittest.TestCase):
+    """Hook-driven bounded self-repair: live cleanliness check, no freeze."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.h = CtlHarness(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def touch(self, root, relpath, content="x\n"):
+        path = os.path.join(root.mount, relpath)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(content)
+
+    def check(self, session_id):
+        out = io.StringIO()
+        result = self.h.controller().check_before_final(session_id, out=out)
+        return result, out.getvalue(), self.h.store.load(session_id)
+
+    def test_clean_in_scope_change_allows(self):
+        session, root = self.h.running_session()
+        self.touch(root, "Projects/proj-a/result.txt")
+        result, _text, reloaded = self.check(session.session_id)
+        self.assertEqual(result, ctl.CHECK_ALLOW)
+        self.assertEqual(reloaded.state, "running")
+        self.assertEqual(reloaded.repair_attempts, 0)
+        self.assertTrue(any(e["event"] == "check-clean"
+                            for e in reloaded.events))
+
+    def test_clean_check_ignores_mode(self):
+        # manual/read-only-review gate the *commit* at finalize; the hook
+        # cleanliness check still lets the agent finish its turn.
+        for mode in ("manual", "read-only-review"):
+            with self.subTest(mode=mode):
+                session, root = self.h.running_session(
+                    mode=mode, branch="agent-%s" % mode)
+                self.touch(root, "Projects/proj-a/result.txt")
+                result, _text, reloaded = self.check(session.session_id)
+                self.assertEqual(result, ctl.CHECK_ALLOW)
+                self.assertEqual(reloaded.state, "running")
+
+    def test_out_of_scope_change_requests_repair(self):
+        session, root = self.h.running_session()
+        self.touch(root, "outside.txt")
+        result, text, reloaded = self.check(session.session_id)
+        self.assertEqual(result, ctl.CHECK_REPAIR)
+        self.assertEqual(reloaded.repair_attempts, 1)
+        self.assertEqual(reloaded.state, "running")
+        self.assertEqual(self.h.backend.branch_state(root), "open")
+        self.assertTrue(any(e["event"] == "repair-requested"
+                            for e in reloaded.events))
+        self.assertIn("/storage/user/outside.txt", text)
+        self.assertIn("revert", text)
+
+    def test_deny_match_requests_repair(self):
+        session, root = self.h.running_session()
+        self.touch(root, "Projects/proj-a/.env", "SECRET=1\n")
+        result, text, reloaded = self.check(session.session_id)
+        self.assertEqual(result, ctl.CHECK_REPAIR)
+        self.assertEqual(reloaded.repair_attempts, 1)
+        self.assertIn(".env", text)
+
+    def test_exhausted_budget_defers_to_review(self):
+        session, root = self.h.running_session(max_repair_attempts=2)
+        self.touch(root, "outside.txt")
+        sid = session.session_id
+        self.assertEqual(self.check(sid)[0], ctl.CHECK_REPAIR)
+        self.assertEqual(self.check(sid)[0], ctl.CHECK_REPAIR)
+        result, text, reloaded = self.check(sid)
+        self.assertEqual(result, ctl.CHECK_EXHAUSTED)
+        self.assertEqual(reloaded.repair_attempts, 2)  # no further increment
+        self.assertEqual(reloaded.state, "running")
+        self.assertTrue(any(e["event"] == "repair-budget-exhausted"
+                            for e in reloaded.events))
+        self.assertIn("review", text)
+
+    def test_non_running_sessions_rejected(self):
+        pending = self.h.run_agent(["sh", "-c", "echo x > ../../outside.txt"])
+        self.assertEqual(pending.state, "pending-review")
+        with self.assertRaises(ctl.ControlError):
+            self.h.controller().check_before_final(pending.session_id)
+
+        terminal = self.h.run_agent(["sh", "-c", "echo ok > fine.txt"])
+        self.assertEqual(terminal.state, "auto-committed")
+        with self.assertRaises(ctl.ControlError):
+            self.h.controller().check_before_final(terminal.session_id)
 
 
 if __name__ == "__main__":

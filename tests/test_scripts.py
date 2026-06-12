@@ -15,6 +15,9 @@ SHIM_SH = os.path.join(AGENT_DIR, "shims", "ccc-agent-shim.sh")
 HOOKS = [os.path.join(AGENT_DIR, "hooks", name)
          for name in ("claude-stop-hook.sh", "codex-stop-hook.sh",
                       "hermes-finish-turn.sh")]
+# hooks with blocking stop semantics (check-before-final self-repair)
+STOP_HOOKS = [os.path.join(AGENT_DIR, "hooks", name)
+              for name in ("claude-stop-hook.sh", "codex-stop-hook.sh")]
 
 
 class TestShellSyntax(unittest.TestCase):
@@ -129,6 +132,57 @@ class TestShim(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertNotIn("REAL:", proc.stdout)
         self.assertIn("refusing", proc.stderr)
+
+
+class TestStopHookSelfRepair(unittest.TestCase):
+    """check-before-final wiring: exit 2 blocks the stop so the agent can
+    repair; every other ctl outcome degrades to report-only (never blocks)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ctl = os.path.join(self._tmp.name, "ccc-agentctl")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def fake_ctl(self, check_rc):
+        with open(self.ctl, "w") as fh:
+            fh.write("#!/bin/sh\n"
+                     "echo \"CALLED $1\"\n"
+                     "if [ \"$1\" = check-before-final ]; then exit %d; fi\n"
+                     "exit 0\n" % check_rc)
+        os.chmod(self.ctl, 0o755)
+
+    def run_hook(self, hook):
+        env = {"PATH": "/usr/bin:/bin",
+               "CCC_AGENT_SESSION": "agent-x",
+               "CCC_AGENTCTL": self.ctl}
+        return subprocess.run(["sh", hook], env=env,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+
+    def test_repair_exit_blocks_stop_without_reporting_turn(self):
+        for hook in STOP_HOOKS:
+            self.fake_ctl(2)
+            proc = self.run_hook(hook)
+            self.assertEqual(proc.returncode, 2, "%s: %s" % (hook, proc.stderr))
+            # repair instructions must reach the harness on stderr
+            self.assertIn("check-before-final", proc.stderr)
+            self.assertNotIn("finish-turn", proc.stdout + proc.stderr)
+
+    def test_clean_check_reports_turn_and_exits_zero(self):
+        for hook in STOP_HOOKS:
+            self.fake_ctl(0)
+            proc = self.run_hook(hook)
+            self.assertEqual(proc.returncode, 0, "%s: %s" % (hook, proc.stderr))
+            self.assertIn("CALLED finish-turn", proc.stdout)
+
+    def test_ctl_failure_never_blocks_stop(self):
+        for hook in STOP_HOOKS:
+            self.fake_ctl(1)  # e.g. ControlError from a racing finalize
+            proc = self.run_hook(hook)
+            self.assertEqual(proc.returncode, 0, "%s: %s" % (hook, proc.stderr))
+            self.assertIn("CALLED finish-turn", proc.stdout)
 
 
 class TestHooksAreNoopsOutsideSessions(unittest.TestCase):

@@ -9,6 +9,10 @@
 #       - exec: /opt/ccc-agent/hooks/hermes-finish-turn.sh
 #
 # Reports turn completion only; commit authority stays with the supervisor.
+# Deliberately no check-before-final here: post_llm_call cannot block/feed
+# instructions back, and an advisory check would silently burn the session's
+# repair budget. Long-running Hermes sessions are closed by a human/operator
+# via `ccc-agentctl finish`, which freezes and applies policy.
 set -eu
 
 CTL="${CCC_AGENTCTL:-/opt/ccc-agent/bin/ccc-agentctl}"

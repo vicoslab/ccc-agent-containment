@@ -28,7 +28,7 @@ import os
 import sys
 
 from .branchfs import BranchfsCli, FakeBranchFS
-from .ctl import Controller, ControlError
+from .ctl import CHECK_REPAIR, Controller, ControlError
 from .paths import AliasMap
 from .runner import RootSpec, RunnerConfig, run_session
 from .session import SessionStore
@@ -142,7 +142,7 @@ def main_ctl(argv=None, env=None):
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
     for name in ("show", "status", "diff", "commit", "abort", "thaw",
-                 "finish", "finish-turn"):
+                 "finish", "finish-turn", "check-before-final"):
         p = sub.add_parser(name)
         p.add_argument("session_id")
     args = parser.parse_args(argv)
@@ -174,6 +174,11 @@ def main_ctl(argv=None, env=None):
                              % (session.session_id, session.state))
         elif args.cmd == "finish-turn":
             controller.finish_turn(args.session_id)
+        elif args.cmd == "check-before-final":
+            # exit 2 = "block the stop, repair": the only code that loops the
+            # agent. Allow and exhausted both exit 0 so hooks cannot livelock.
+            if controller.check_before_final(args.session_id) == CHECK_REPAIR:
+                return 2
     except ControlError as exc:
         sys.stderr.write("ccc-agentctl: %s\n" % exc)
         return 1

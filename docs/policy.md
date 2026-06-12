@@ -80,8 +80,22 @@ touched).
 | `training-run` | scopes = declared artifact dirs (checkpoints, logs) |
 | `throwaway` | exploration; discard at completion unless a human commits first |
 
-`max_policy_repair_attempts` (default 2) reserves the retry budget for the
-hook-driven self-repair flow: when a harness supports a blocking Stop hook,
-the supervisor may ask the agent to revert out-of-scope writes before final
-freeze. The budget is stored per session; the repair loop itself ships with
-the hook adapters phase.
+## Bounded self-repair (`ccc-agentctl check-before-final`)
+
+When a harness supports a blocking Stop hook (Claude Code, Codex), the hook
+runs `ccc-agentctl check-before-final <session>` before reporting the turn.
+The check classifies **live** status — no freeze, no commit — and only looks
+at scope and deny/hide hygiene; mode semantics (`manual`,
+`read-only-review`, ...) still apply at finalize:
+
+- **clean** → exit 0 (`check-clean` event); the stop proceeds and the normal
+  finalize flow decides per mode;
+- **dirty, repair budget left** → exit 2 with the offending paths printed;
+  the harness blocks the stop and the agent reverts in-session
+  (`repair-requested` event, `repair_attempts` incremented);
+- **dirty, budget exhausted** → exit 0 (`repair-budget-exhausted` event) so
+  hooks can never livelock the agent; the violations simply land in
+  `pending-review` at finalize.
+
+`max_policy_repair_attempts` (default 2) bounds the loop; the count is
+stored per session, in supervisor state the agent cannot touch.

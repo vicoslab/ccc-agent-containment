@@ -57,11 +57,11 @@ land under `<state_dir>/reviews/<session-id>/`.
 |---|---|
 | `bin/ccc-agent-run` | trusted launcher: session + branch bundle + agent + finalize |
 | `bin/ccc-agent-launch` | same, used by transparent shims (workspace = `$PWD`) |
-| `bin/ccc-agentctl` | operator CLI: list/show/status/diff/commit/abort/thaw/finish/finish-turn |
+| `bin/ccc-agentctl` | operator CLI: list/show/status/diff/commit/abort/thaw/finish/finish-turn/check-before-final |
 | `ccc_agent/` | stdlib-only Python: session store, policy engine, BranchFS driver |
 | `scripts/ccc-agent-chroot.sh` | privileged chroot assembly (dry-run by default) |
 | `shims/ccc-agent-shim.sh` | transparent `codex`/`claude`/... PATH shims |
-| `hooks/` | Stop/finish-turn adapters for Claude Code, Codex, Hermes |
+| `hooks/` | Stop/finish-turn adapters for Claude Code, Codex, Hermes (report + bounded self-repair) |
 | `config/` | runtime config + Claude managed-settings examples |
 
 Design references: `docs/architecture.md` (trust boundaries, chroot layout),
@@ -85,7 +85,9 @@ Hard rules:
 - the BranchFS store and real underlay paths must not be visible inside the
   agent's view (the chroot assembler enforces this; in no-chroot dev mode the
   `.ccc-agent` deny pattern is the fallback);
-- hooks report; only the supervisor/operator commits.
+- hooks report and at most request self-repair (`ccc-agentctl
+  check-before-final` exits 2 with the offending paths while the per-session
+  repair budget lasts); only the supervisor/operator commits.
 
 Shims (optional, after the explicit wrapper works for you):
 

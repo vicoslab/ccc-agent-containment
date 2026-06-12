@@ -1,11 +1,14 @@
 """Tests for the ccc-agent-run / ccc-agentctl command-line layer."""
 
+import contextlib
+import io
 import json
 import os
 import tempfile
 import unittest
 
 from ccc_agent.cli import load_config, main_ctl, main_run
+from ccc_agent.session import ProtectedRoot, SessionStore
 
 
 class CliHarness(object):
@@ -116,6 +119,66 @@ class TestMainCtl(unittest.TestCase):
         self.assertEqual(
             main_ctl(["--config", self.h.config_path, "commit",
                       "agent-missing"], env={}), 1)
+
+
+class TestMainCtlCheckBeforeFinal(unittest.TestCase):
+    """Exit-code contract for the hook: 2 = repair, 0 = allow/exhausted."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.h = CliHarness(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def make_running_session(self, dirty_rel=None, max_repair_attempts=1):
+        # Park a session in `running` against the same state dir the CLI
+        # uses; FakeBranchFS status only needs the on-disk branch delta dir.
+        store = SessionStore(os.path.join(self.h.tmp, "state"))
+        branch_store = os.path.join(self.h.tmp, "stores", "storage_user")
+        files = os.path.join(branch_store, "branches", "agent-live", "files")
+        os.makedirs(files, exist_ok=True)
+        root = ProtectedRoot(
+            name="storage_user", base=self.h.base, store=branch_store,
+            branch="agent-live",
+            mount=os.path.join(self.h.tmp, "mounts", "agent-live"),
+            visible="/storage/user", home_subdir="")
+        session = store.create(
+            owner="domen", agent_kind="claude", agent_command=["claude"],
+            workspace="/storage/user/Projects/proj-a",
+            policy={"mode": "workspace-auto",
+                    "allowed_scopes": ["/storage/user/Projects/proj-a"],
+                    "max_policy_repair_attempts": max_repair_attempts},
+            protected_roots={"storage_user": root}, completion="manual")
+        session.transition("mounting")
+        session.transition("running")
+        store.save(session)
+        if dirty_rel:
+            with open(os.path.join(files, dirty_rel), "w") as fh:
+                fh.write("x\n")
+        return session.session_id
+
+    def check(self, sid):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main_ctl(["--config", self.h.config_path,
+                             "check-before-final", sid], env={})
+        return code, out.getvalue()
+
+    def test_repair_then_exhausted_exit_codes(self):
+        sid = self.make_running_session(dirty_rel="outside.txt")
+        code, text = self.check(sid)
+        self.assertEqual(code, 2)        # dirty + budget left: ask for repair
+        self.assertIn("/storage/user/outside.txt", text)
+        code, _text = self.check(sid)
+        self.assertEqual(code, 0)        # budget exhausted: never loop
+
+    def test_clean_running_session_exits_zero(self):
+        sid = self.make_running_session()
+        self.assertEqual(self.check(sid)[0], 0)
+
+    def test_control_error_exits_one(self):
+        self.assertEqual(self.check("agent-missing")[0], 1)
 
 
 if __name__ == "__main__":
