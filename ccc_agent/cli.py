@@ -114,10 +114,21 @@ def main_run(argv=None, env=None):
         "hide_patterns": list(args.hide) + list(config.get("hide_patterns",
                                                            ())),
     }
+    confinement = config.get("confinement", "none")
+    agent_uid = config.get("agent_uid")
+    agent_gid = config.get("agent_gid")
+    if confinement == "chroot" and (agent_uid is None or agent_gid is None):
+        import pwd
+        pw = pwd.getpwnam(user)
+        agent_uid = pw.pw_uid if agent_uid is None else agent_uid
+        agent_gid = pw.pw_gid if agent_gid is None else agent_gid
     runner_config = RunnerConfig(
         store=store, backend=backend, alias_map=alias_map, owner=user,
         agent_kind=args.agent, agent_command=command, workspace=workspace,
-        policy=policy, roots=roots)
+        policy=policy, roots=roots,
+        confinement=confinement,
+        chroot_script=config.get("chroot_script"),
+        agent_uid=agent_uid, agent_gid=agent_gid)
     session = run_session(runner_config, env=env)
 
     sys.stderr.write("ccc-agent: session %s finished: %s\n"

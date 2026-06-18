@@ -17,6 +17,7 @@
 #     --view /__branchfs_mounts/storage_user \
 #     --user domen --uid 1000 --gid 1000 \
 #     [--home-subdir ""] \
+#     [--workdir /storage/user/Projects/proj-a] \
 #     [--extra-view name=/path/to/view:/visible/path]... \
 #     [--chroot-root /run/ccc-agent/chroots] \
 #     [--apply] \
@@ -39,6 +40,7 @@ AGENT_USER=""
 AGENT_UID=""
 AGENT_GID=""
 HOME_SUBDIR=""
+WORKDIR=""
 CHROOT_BASE="/run/ccc-agent/chroots"
 APPLY=0
 declare -a EXTRA_VIEWS=()
@@ -54,6 +56,7 @@ while [[ $# -gt 0 ]]; do
         --uid) AGENT_UID="$2"; shift 2 ;;
         --gid) AGENT_GID="$2"; shift 2 ;;
         --home-subdir) HOME_SUBDIR="$2"; shift 2 ;;
+        --workdir) WORKDIR="$2"; shift 2 ;;
         --extra-view) EXTRA_VIEWS+=("$2"); shift 2 ;;
         --chroot-root) CHROOT_BASE="$2"; shift 2 ;;
         --apply) APPLY=1; shift ;;
@@ -100,7 +103,8 @@ emit_plan() {
     done
     plan "write session marker -> $ROOT/run/ccc-agent/session"
     plan "NOT exposed: real underlay, BranchFS store, daemon.sock, docker.sock"
-    plan "exec: unshare -m chroot $ROOT setpriv --reuid=$AGENT_UID --regid=$AGENT_GID --init-groups env CCC_AGENT_SESSION=$SESSION_ID HOME=/home/$AGENT_USER ${COMMAND[*]}"
+    [[ -n "$WORKDIR" ]] && plan "workdir (inside chroot): $WORKDIR"
+    plan "exec: unshare -m chroot $ROOT setpriv --reuid=$AGENT_UID --regid=$AGENT_GID --init-groups env CCC_AGENT_SESSION=$SESSION_ID HOME=/home/$AGENT_USER ${WORKDIR:+PWD=$WORKDIR }${COMMAND[*]}"
 }
 
 if [[ "$APPLY" -eq 0 ]]; then
@@ -121,7 +125,8 @@ if [[ -z "${CCC_AGENT_CHROOT_NS:-}" ]]; then
     exec unshare -m --propagation private -- "$0" \
         --session-id "$SESSION_ID" --view "$VIEW" \
         --user "$AGENT_USER" --uid "$AGENT_UID" --gid "$AGENT_GID" \
-        --home-subdir "$HOME_SUBDIR" --chroot-root "$CHROOT_BASE" \
+        --home-subdir "$HOME_SUBDIR" --workdir "$WORKDIR" \
+        --chroot-root "$CHROOT_BASE" \
         $(for spec in "${EXTRA_VIEWS[@]:-}"; do
               [[ -n "$spec" ]] && printf -- '--extra-view %q ' "$spec"
           done) \
@@ -177,6 +182,16 @@ mkdir -p "$ROOT/run/ccc-agent"
 printf '%s\n' "$SESSION_ID" > "$ROOT/run/ccc-agent/session"
 chmod 0444 "$ROOT/run/ccc-agent/session"
 
+# When --workdir is set, cd into it inside the chroot before exec.  env -i runs
+# the command directly (no shell), so use a tiny sh trampoline: it cd's to $1,
+# shifts, and execs the rest as the real agent command.
+if [[ -n "$WORKDIR" ]]; then
+    set -- /bin/sh -c 'cd "$1" || exit 1; shift; exec "$@"' sh "$WORKDIR" \
+        "${COMMAND[@]}"
+else
+    set -- "${COMMAND[@]}"
+fi
+
 exec chroot "$ROOT" /usr/bin/setpriv \
     --reuid="$AGENT_UID" --regid="$AGENT_GID" --init-groups \
     /usr/bin/env -i \
@@ -186,4 +201,4 @@ exec chroot "$ROOT" /usr/bin/setpriv \
     LOGNAME="$AGENT_USER" \
     PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     TERM="${TERM:-xterm}" \
-    "${COMMAND[@]}"
+    "$@"

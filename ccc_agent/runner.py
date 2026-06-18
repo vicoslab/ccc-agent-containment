@@ -52,10 +52,14 @@ class RootSpec(object):
                              hide_paths=self.hide_paths)
 
 
+CONFINEMENT_MODES = ("none", "chroot")
+
+
 class RunnerConfig(object):
     def __init__(self, store, backend, alias_map, owner, agent_kind,
                  agent_command, workspace, policy, roots,
-                 completion="process-exit"):
+                 completion="process-exit", confinement="none",
+                 chroot_script=None, agent_uid=None, agent_gid=None):
         self.store = store              # SessionStore
         self.backend = backend          # BranchfsCli or FakeBranchFS
         self.alias_map = alias_map
@@ -69,6 +73,20 @@ class RunnerConfig(object):
         PolicyConfig.from_dict(self.policy)  # validate early
         self.roots = list(roots)
         self.completion = completion
+        if confinement not in CONFINEMENT_MODES:
+            raise ValueError("unknown confinement %r (expected one of %s)"
+                             % (confinement, ", ".join(CONFINEMENT_MODES)))
+        self.confinement = confinement
+        self.chroot_script = chroot_script
+        self.agent_uid = agent_uid
+        self.agent_gid = agent_gid
+        if confinement == "chroot":
+            missing = [n for n, v in (("chroot_script", chroot_script),
+                                      ("agent_uid", agent_uid),
+                                      ("agent_gid", agent_gid)) if v is None]
+            if missing:
+                raise ValueError("chroot confinement requires: %s"
+                                 % ", ".join(missing))
 
 
 def _agent_cwd(session, alias_map):
@@ -82,6 +100,47 @@ def _agent_cwd(session, alias_map):
                     os.path.join(root.mount, rel))
     raise ValueError("workspace %s is not under any protected root"
                      % session.workspace)
+
+
+def _primary_root(session, alias_map):
+    """The protected root whose visible path contains the workspace."""
+    workspace = alias_map.canonicalize(session.workspace)
+    for root in session.protected_roots.values():
+        if is_within(workspace, alias_map.canonicalize(root.visible)):
+            return root
+    raise ValueError("workspace %s is not under any protected root"
+                     % session.workspace)
+
+
+def _chroot_command(session, config):
+    """Wrap the agent command in the privileged chroot assembler.
+
+    The agent never sees the real underlay: it runs as ``agent_uid`` chrooted
+    into the BranchFS view, with the workspace as its cwd.  Extra protected
+    roots are exposed at their visible paths inside the chroot.
+    """
+    alias_map = config.alias_map
+    primary = _primary_root(session, alias_map)
+    # The workspace path as seen inside the chroot is its canonical visible
+    # path (the view is bind-mounted at /storage/user and /home/<user>).
+    workdir = alias_map.canonicalize(session.workspace)
+    argv = [config.chroot_script,
+            "--session-id", session.session_id,
+            "--view", primary.mount,
+            "--user", config.owner,
+            "--uid", str(config.agent_uid),
+            "--gid", str(config.agent_gid),
+            "--home-subdir", primary.home_subdir or "",
+            "--workdir", workdir]
+    for name, root in sorted(session.protected_roots.items()):
+        if root is primary:
+            continue
+        argv.extend(["--extra-view", "%s=%s:%s"
+                     % (name, root.mount, alias_map.canonicalize(root.visible))])
+    argv.append("--apply")
+    argv.append("--")
+    argv.extend(config.agent_command)
+    return argv
 
 
 def _fail(store, session, detail):
@@ -201,10 +260,11 @@ def run_session(config, env=None, before_finalize=None):
     try:
         session.transition("mounting")
         config.store.save(session)
+        allow_other = config.confinement == "chroot"
         for root in session.protected_roots.values():
             config.backend.start_daemon(root)
             config.backend.create_branch(root)
-            config.backend.mount(root, agent=True)
+            config.backend.mount(root, agent=True, allow_other=allow_other)
         session.add_event("mounted-bundle")
     except Exception as exc:
         _fail(config.store, session, "mount failed: %s" % exc)
@@ -220,7 +280,14 @@ def run_session(config, env=None, before_finalize=None):
 
         session.transition("running")
         config.store.save(session)
-        proc = subprocess.run(config.agent_command, cwd=cwd, env=run_env)
+        if config.confinement == "chroot":
+            # The chroot assembler drops to the agent uid and cd's into the
+            # workspace inside the chroot, so no host-side cwd is set here.
+            argv = _chroot_command(session, config)
+            session.add_event("chroot-launch", " ".join(argv[:1]))
+            proc = subprocess.run(argv, env=run_env)
+        else:
+            proc = subprocess.run(config.agent_command, cwd=cwd, env=run_env)
         session.exit_status = proc.returncode
         session.add_event("agent-exit", str(proc.returncode))
     except Exception as exc:

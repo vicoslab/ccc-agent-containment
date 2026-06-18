@@ -60,6 +60,11 @@ class TestChrootDryRun(unittest.TestCase):
             "bind-rw /__branchfs_mounts/storage_user/domen -> "
             "/run/ccc-agent/chroots/agent-test-1/home/domen", out)
 
+    def test_workdir_plan(self):
+        out = self.run_dry("--workdir", "/storage/user/Projects/proj-a")
+        self.assertIn("workdir (inside chroot): /storage/user/Projects/proj-a",
+                      out)
+
     def test_dry_run_performs_no_mounts(self):
         # the dry run must not create the chroot directory
         out = self.run_dry()

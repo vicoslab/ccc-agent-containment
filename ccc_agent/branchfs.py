@@ -71,11 +71,16 @@ class BranchfsCli(object):
             argv.extend(["--hide", hidden])
         self._invoke(*argv)
 
-    def mount(self, root, agent=True):
+    def mount(self, root, agent=True, allow_other=False):
         self.start_daemon(root)
         argv = ["mount", "--storage", root.store, "--branch", root.branch]
         if agent:
             argv.append("--agent")
+        if allow_other:
+            # Privilege-separated chroot model: the root daemon mounts a view
+            # the non-root agent uid must access.  Without allow_other FUSE
+            # denies any uid but the mounting (root) one.
+            argv.append("--allow-other")
         argv.append(root.mount)
         self._invoke(*argv)
 
@@ -145,7 +150,7 @@ class FakeBranchFS(object):
         self._state[self._key(root)] = "open"
         self._deletes.setdefault(self._key(root), set())
 
-    def mount(self, root, agent=True):
+    def mount(self, root, agent=True, allow_other=False):
         files = self._files_dir(root)
         os.makedirs(files, exist_ok=True)
         parent = os.path.dirname(root.mount)

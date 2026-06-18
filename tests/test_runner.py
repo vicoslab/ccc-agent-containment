@@ -9,8 +9,10 @@ These mirror the Phase 2 validation list from the accepted design:
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from ccc_agent.branchfs import FakeBranchFS
 from ccc_agent.paths import AliasMap
@@ -31,7 +33,7 @@ class RunnerHarness(object):
         self.store = SessionStore(self.state_dir)
         self.mode = mode
 
-    def config(self, argv, mode=None, hide_patterns=()):
+    def config(self, argv, mode=None, hide_patterns=(), **extra):
         return RunnerConfig(
             store=self.store,
             backend=self.backend,
@@ -49,6 +51,7 @@ class RunnerHarness(object):
                             store=os.path.join(self.tmp, "stores",
                                                "storage_user"),
                             visible="/storage/user", home_subdir="")],
+            **extra
         )
 
 
@@ -172,6 +175,81 @@ class TestRunSession(unittest.TestCase):
             ["sh", "-c", "echo x > ../../outside.txt"]))
         root = session.protected_roots["storage_user"]
         self.assertEqual(self.h.backend.branch_state(root), "frozen")
+
+
+class TestChrootConfinement(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.h = RunnerHarness(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _chroot_config(self, argv, **kw):
+        return self.h.config(argv, confinement="chroot",
+                             chroot_script="/opt/ccc-agent/ccc-agent-chroot.sh",
+                             agent_uid=2094, agent_gid=2094, **kw)
+
+    def test_chroot_confinement_requires_script_and_ids(self):
+        with self.assertRaises(ValueError):
+            self.h.config(["true"], confinement="chroot")
+
+    def test_unknown_confinement_rejected(self):
+        with self.assertRaises(ValueError):
+            self.h.config(["true"], confinement="jail")
+
+    def test_chroot_mode_mounts_allow_other_and_wraps_command(self):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            seen["cwd"] = kwargs.get("cwd")
+            return subprocess.CompletedProcess(argv, 0)
+
+        # Record whether the view was mounted with allow_other.
+        orig_mount = self.h.backend.mount
+        mounts = []
+
+        def spy_mount(root, agent=True, allow_other=False):
+            mounts.append(allow_other)
+            return orig_mount(root, agent=agent, allow_other=allow_other)
+
+        self.h.backend.mount = spy_mount
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self._chroot_config(["my-agent", "--flag"]))
+
+        self.assertTrue(all(mounts) and mounts, "agent mount must allow_other")
+        argv = seen["argv"]
+        self.assertEqual(argv[0], "/opt/ccc-agent/ccc-agent-chroot.sh")
+        self.assertIn("--apply", argv)
+        self.assertIn("--session-id", argv)
+        self.assertIn(session.session_id, argv)
+        self.assertIn("--uid", argv)
+        self.assertIn("2094", argv)
+        # workspace canonicalized into the storage_user namespace
+        self.assertIn("--workdir", argv)
+        self.assertIn("/storage/user/Projects/proj-a", argv)
+        # the real agent command follows the -- separator
+        sep = argv.index("--")
+        self.assertEqual(argv[sep + 1:], ["my-agent", "--flag"])
+        # no host-side cwd is forced in chroot mode (the assembler cd's)
+        self.assertIsNone(seen["cwd"])
+        self.assertTrue(any(e.get("kind") == "chroot-launch"
+                            or e.get("event") == "chroot-launch"
+                            for e in session.events))
+
+    def test_none_confinement_runs_command_directly(self):
+        # Regression: default mode must not wrap the command.
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            run_session(self.h.config(["my-agent", "--flag"]))
+        self.assertEqual(seen["argv"], ["my-agent", "--flag"])
 
 
 if __name__ == "__main__":

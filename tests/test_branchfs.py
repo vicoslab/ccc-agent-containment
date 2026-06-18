@@ -115,6 +115,21 @@ class TestBranchfsCli(unittest.TestCase):
         cli.mount(self.root, agent=False)
         self.assertNotIn("--agent", runner.calls[-1])
 
+    def test_mount_allow_other_for_privilege_separated_agent(self):
+        runner = RecordingRunner()
+        cli = BranchfsCli(run=runner)
+        cli.mount(self.root, agent=True, allow_other=True)
+        call = runner.calls[-1]
+        self.assertIn("--allow-other", call)
+        # mountpoint stays the final positional argument
+        self.assertEqual(call[-1], self.root.mount)
+
+    def test_mount_omits_allow_other_by_default(self):
+        runner = RecordingRunner()
+        cli = BranchfsCli(run=runner)
+        cli.mount(self.root, agent=True)
+        self.assertNotIn("--allow-other", runner.calls[-1])
+
     def test_status_parses_changes_into_visible_namespace(self):
         runner = RecordingRunner(outputs={"status": json.dumps(STATUS_JSON)})
         cli = BranchfsCli(run=runner)
