@@ -115,6 +115,15 @@ def finalize_session(session, store, backend, alias_map):
     review = artifacts.write_review(store, session, changes_by_root, decision)
     session.add_event("review-artifacts", review)
 
+    # Apply the decision against unmounted branches.  The real branchfs binary
+    # cannot commit/abort a branch whose store is still busy with a live mount
+    # (commit-branch fails with ENOTEMPTY), and a pending-review branch is
+    # inspected later through the store, not this mount.  Unmount here so every
+    # terminal path operates on a quiescent branch; run_session's finally is a
+    # harmless idempotent backstop.
+    _unmount_all(session, backend)
+    session.add_event("unmounted-bundle")
+
     if decision.decision == NO_CHANGES:
         for root in session.protected_roots.values():
             backend.abort(root)

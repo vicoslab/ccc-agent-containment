@@ -139,6 +139,24 @@ class TestRunSession(unittest.TestCase):
         persisted = self.h.store.load(session.session_id)
         self.assertEqual(persisted.state, "failed")
 
+    def test_auto_commit_unmounts_before_committing(self):
+        # The real branchfs binary fails commit-branch with ENOTEMPTY if the
+        # branch is still mounted (the store dir is busy).  The supervisor must
+        # unmount the bundle before applying the commit decision.
+        class MountedCommitFails(FakeBranchFS):
+            def commit(self, root):
+                if root.mount in self._mounted:
+                    raise RuntimeError("Directory not empty (os error 39)")
+                super(MountedCommitFails, self).commit(root)
+
+        self.h.backend = MountedCommitFails()
+        session = run_session(self.h.config(
+            ["sh", "-c", "echo done > result.txt"]))
+        self.assertEqual(session.state, "auto-committed")
+        committed = os.path.join(self.h.base, "Projects", "proj-a",
+                                 "result.txt")
+        self.assertTrue(os.path.isfile(committed))
+
     def test_nested_invocation_reuses_session(self):
         outer = run_session(self.h.config(
             ["sh", "-c", "echo outer > outer.txt"]))
