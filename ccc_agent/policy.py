@@ -165,7 +165,16 @@ def classify(changes, config, alias_map):
     deny_matches = []
     for change in changes:
         canonical = alias_map.canonicalize(change.path)
-        if not any(is_within(canonical, scope) for scope in scopes):
+        in_scope = any(is_within(canonical, scope) for scope in scopes)
+        # A directory that is an *ancestor* of an allowed scope is structural
+        # plumbing: writing a nested file makes BranchFS emit deltas for every
+        # parent directory up to the branch root.  Those ancestors sit above
+        # the workspace scope but are not real out-of-scope writes, so they
+        # must not block auto-commit.  A sibling/unrelated directory is not an
+        # ancestor and stays flagged.
+        if not in_scope and change.kind == "dir":
+            in_scope = any(is_within(scope, canonical) for scope in scopes)
+        if not in_scope:
             out_of_scope.append(canonical)
         for pattern in deny:
             if path_matches(pattern, canonical):
