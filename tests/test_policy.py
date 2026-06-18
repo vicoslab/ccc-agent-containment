@@ -72,6 +72,35 @@ class TestEvaluate(unittest.TestCase):
         self.assertEqual(d.decision, PENDING_REVIEW)
         self.assertEqual(d.out_of_scope, ["/storage/user/.bashrc"])
 
+    def test_ancestor_dirs_of_scope_are_not_out_of_scope(self):
+        # Writing a nested file makes BranchFS emit structural deltas for the
+        # parent directories (/storage/user/Projects, .../proj-a).  Those are
+        # ancestors of the allowed scope and must not block auto-commit.
+        changes = [
+            Change(op="M", path="/storage/user/Projects", kind="dir"),
+            Change(op="M", path=f"{WORKSPACE}", kind="dir"),
+            Change(op="A", path=f"{WORKSPACE}/done.txt"),
+        ]
+        d = evaluate(changes, cfg(), AMAP)
+        self.assertEqual(d.decision, AUTO_COMMIT)
+        self.assertEqual(d.out_of_scope, [])
+
+    def test_sibling_dir_outside_scope_still_forces_review(self):
+        # A directory that is *not* an ancestor of the scope (a sibling under
+        # the same parent) must still be flagged out-of-scope.
+        changes = [
+            Change(op="A", path=f"{WORKSPACE}/ok.py"),
+            Change(op="A", path="/storage/user/Projects/proj-other", kind="dir"),
+            Change(op="A", path="/storage/user/Projects/proj-other/sneak.txt"),
+        ]
+        d = evaluate(changes, cfg(), AMAP)
+        self.assertEqual(d.decision, PENDING_REVIEW)
+        self.assertEqual(
+            sorted(d.out_of_scope),
+            ["/storage/user/Projects/proj-other",
+             "/storage/user/Projects/proj-other/sneak.txt"],
+        )
+
     def test_home_alias_counts_as_in_scope(self):
         # change reported via /home alias, scope declared via /storage/user
         changes = [Change(op="A", path="/home/domen/Projects/proj-a/x.py")]
