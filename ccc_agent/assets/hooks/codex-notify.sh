@@ -18,11 +18,11 @@
 # blocking per-turn approval flow.
 set -eu
 
-CTL="${CCC_AGENTCTL:-/opt/ccc-agent/bin/ccc-agentctl}"
+CTL="${CCC_AGENTCTL:-ccc-agentctl}"
 
 [ -n "${CCC_AGENT_SESSION:-}" ] || exit 0
 [ -n "${CCC_AGENT_CONTROL_SOCK:-}" ] || exit 0
-[ -x "$CTL" ] || exit 0
+command -v "$CTL" >/dev/null 2>&1 || exit 0
 
 event="${1:-}"
 case "$event" in

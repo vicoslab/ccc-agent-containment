@@ -8,10 +8,10 @@
 # commit from a hook.
 set -eu
 
-CTL="${CCC_AGENTCTL:-/opt/ccc-agent/bin/ccc-agentctl}"
+CTL="${CCC_AGENTCTL:-ccc-agentctl}"
 
 [ -n "${CCC_AGENT_SESSION:-}" ] || exit 0
-[ -x "$CTL" ] || exit 0
+command -v "$CTL" >/dev/null 2>&1 || exit 0
 
 # Per-turn control: signal end-of-turn to the supervisor over the control
 # socket (the in-sandbox agent can't reach the store). It commits in-scope

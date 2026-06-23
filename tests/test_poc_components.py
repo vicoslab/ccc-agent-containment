@@ -19,7 +19,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 BIN = os.path.join(REPO, "bin")
 SCRIPTS = os.path.join(REPO, "scripts")
-HOOKS = os.path.join(REPO, "hooks")
+ASSETS = os.path.join(REPO, "ccc_agent", "assets")
+HOOKS = os.path.join(ASSETS, "hooks")
 
 # branchfs binary: env var, worktree debug build, or PATH
 _BRANCHFS_CANDIDATES = [
@@ -345,7 +346,7 @@ class TestHookScripts(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestShimScript(unittest.TestCase):
 
-    SHIM = os.path.join(REPO, "shims", "ccc-agent-shim.sh")
+    SHIM = os.path.join(ASSETS, "shims", "ccc-agent-shim.sh")
 
     def test_syntax_check(self):
         result = subprocess.run(["bash", "-n", self.SHIM],

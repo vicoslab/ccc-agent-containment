@@ -141,13 +141,13 @@ done
 do_it cp "$SCRIPT_DIR/bin/ccc-agent-softsandbox" "$PREFIX/bin/ccc-agent-softsandbox"
 do_it chmod +x "$PREFIX/bin/ccc-agent-softsandbox"
 
-# hooks
-for hook in hooks/*.sh; do
+# hooks (bundled under the package as assets since pip packaging)
+for hook in ccc_agent/assets/hooks/*.sh; do
     [[ -f "$hook" ]] && do_it cp "$SCRIPT_DIR/$hook" "$PREFIX/hooks/" || true
 done
 
 # shims
-do_it cp "$SCRIPT_DIR/shims/ccc-agent-shim.sh" "$PREFIX/shims/"
+do_it cp "$SCRIPT_DIR/ccc_agent/assets/shims/ccc-agent-shim.sh" "$PREFIX/shims/"
 do_it chmod +x "$PREFIX/shims/ccc-agent-shim.sh"
 
 echo "  Scripts installed to $PREFIX/"

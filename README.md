@@ -116,15 +116,37 @@ Design references: `docs/architecture.md` (trust boundaries, sandbox layout),
 `docs/policy.md` (path policy + secret hiding), and the workspace-level
 `CCC_AGENT_BRANCHFS_PROTECTION_REVIEW_DESIGN.md`.
 
-## Deployment
+## Install
 
-```text
-/opt/ccc-agent/
-  bin/ccc-agent-run ccc-agent-launch ccc-agentctl   (+ branchfs + bwrap binaries)
-  ccc_agent/                                        (python package)
-  scripts/ hooks/ shims/ config/
-/etc/ccc-agent/config.json                          (root-owned)
+It's a pip package (stdlib-only, no dependencies) with console-script entry
+points and the shell hooks/shims bundled as package data.
+
+```bash
+# system (CCC images / shared): install into the SYSTEM python so the entry
+# points are conda-independent (shebang pinned to /usr/bin/python3) and visible
+# inside the bwrap sandbox (which only exposes /usr):
+/usr/bin/python3 -m pip install --break-system-packages \
+    "git+https://github.com/vicoslab/ccc-agent-containment.git@master"
+ccc-agent-setup --system --branchfs-bin /usr/local/bin/branchfs --bwrap-bin "$(command -v bwrap)"
+
+# user / dev:
+python3 -m pip install --user "git+https://github.com/vicoslab/ccc-agent-containment.git"
+ccc-agent-setup --user
 ```
+
+`ccc-agent-setup` does what pip can't: writes `config.json`, registers the
+Claude Stop hook (managed settings for `--system`, `~/.claude/settings.json`
+for `--user`) and the codex `notify` hook, and optionally installs the
+transparent PATH shims (`--enable-shims`). The hooks it registers point into
+the installed package (`ccc_agent/assets/hooks/…`), which lives under `/usr`
+for a system install and is therefore exposed read-only inside the sandbox.
+
+The branchfs binary and bwrap are separate (not pip-installable); in CCC images
+the runit startup installs them and runs the two commands above (see the CCC
+image repo's `06_ccc_agent_containment.sh`). The legacy
+`install-ccc-agent-plugin.sh` remains as a hand-rolled user-level installer.
+
+## Deployment
 
 Hard rules:
 

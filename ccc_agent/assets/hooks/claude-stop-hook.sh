@@ -19,14 +19,14 @@
 # self-repair; they never freeze, commit, or abort.
 set -eu
 
-CTL="${CCC_AGENTCTL:-/opt/ccc-agent/bin/ccc-agentctl}"
+CTL="${CCC_AGENTCTL:-ccc-agentctl}"
 
 if [ -z "${CCC_AGENT_SESSION:-}" ]; then
     # not a contained session (e.g. human-run claude outside ccc-agent-run)
     exit 0
 fi
 
-if [ ! -x "$CTL" ]; then
+if ! command -v "$CTL" >/dev/null 2>&1; then
     echo "ccc claude hook: ccc-agentctl not found at $CTL" >&2
     exit 0   # never block the agent's stop on hook plumbing problems
 fi

@@ -9,12 +9,13 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT_DIR = os.path.dirname(HERE)
-SHIM_SH = os.path.join(AGENT_DIR, "shims", "ccc-agent-shim.sh")
-HOOKS = [os.path.join(AGENT_DIR, "hooks", name)
+ASSETS = os.path.join(AGENT_DIR, "ccc_agent", "assets")
+SHIM_SH = os.path.join(ASSETS, "shims", "ccc-agent-shim.sh")
+HOOKS = [os.path.join(ASSETS, "hooks", name)
          for name in ("claude-stop-hook.sh", "codex-stop-hook.sh",
                       "hermes-finish-turn.sh")]
 # hooks with blocking stop semantics (check-before-final self-repair)
-STOP_HOOKS = [os.path.join(AGENT_DIR, "hooks", name)
+STOP_HOOKS = [os.path.join(ASSETS, "hooks", name)
               for name in ("claude-stop-hook.sh", "codex-stop-hook.sh")]
 
 
