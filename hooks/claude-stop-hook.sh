@@ -31,12 +31,22 @@ if [ ! -x "$CTL" ]; then
     exit 0   # never block the agent's stop on hook plumbing problems
 fi
 
-# Bounded self-repair: ask the supervisor whether the live branch is clean.
-# Exit 2 means "dirty, repair budget left": Claude Code blocks the stop and
-# feeds the instructions (stderr) back to the agent, which reverts the
-# flagged paths in-session.  Any other outcome — clean, budget exhausted,
-# control error — must NOT block the stop; finalize parks dirty sessions
-# as pending-review for a human instead.
+# Per-turn control: inside a contained session the agent cannot reach the
+# BranchFS store, so signal end-of-turn to the supervisor over the control
+# socket.  It commits the turn's in-scope changes and exits 0 (the stop
+# proceeds); on out-of-scope changes it exits 2 with the offending paths and an
+# approval token on stderr, which Claude Code feeds back to the agent so it can
+# ask the user and then run `ccc-agentctl approve-turn <token>`.
+if [ -n "${CCC_AGENT_CONTROL_SOCK:-}" ]; then
+    rc=0
+    "$CTL" finalize-turn || rc=$?
+    exit "$rc"
+fi
+
+# Fallback (no control socket — dev/none mode): store-based bounded self-repair.
+# Exit 2 ("dirty, repair budget left") blocks the stop so the agent reverts the
+# flagged paths; any other outcome must NOT block (finalize parks dirty sessions
+# as pending-review for a human).
 rc=0
 "$CTL" check-before-final "$CCC_AGENT_SESSION" 1>&2 || rc=$?
 if [ "$rc" -eq 2 ]; then

@@ -77,9 +77,10 @@ class BranchfsCli(object):
         if agent:
             argv.append("--agent")
         if allow_other:
-            # Privilege-separated chroot model: the root daemon mounts a view
-            # the non-root agent uid must access.  Without allow_other FUSE
-            # denies any uid but the mounting (root) one.
+            # Only needed when the daemon and the agent run as different uids
+            # (FUSE otherwise denies any uid but the mounting one).  The current
+            # bwrap/none models are same-uid, so this stays off; kept for any
+            # future privilege-separated mount.
             argv.append("--allow-other")
         argv.append(root.mount)
         self._invoke(*argv)
@@ -186,7 +187,7 @@ class FakeBranchFS(object):
                          "bytes": 0})
         return _changes_from_status({"diff": diff}, root)
 
-    def commit(self, root):
+    def _apply_to_base(self, root):
         files = self._files_dir(root)
         if os.path.isdir(files):
             for dirpath, _dirnames, filenames in os.walk(files):
@@ -202,6 +203,9 @@ class FakeBranchFS(object):
                 os.unlink(target)
             elif os.path.isdir(target):
                 shutil.rmtree(target)
+
+    def commit(self, root):
+        self._apply_to_base(root)
         self._cleanup(root)
 
     def abort(self, root):

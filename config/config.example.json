@@ -5,6 +5,24 @@
   "branchfs_bin": "/opt/ccc-agent/bin/branchfs",
   "user": "domen",
   "home_subdir": "",
+
+  "_confinement_comment": "bwrap = real rootless sandbox (default). none = debug only, NOT a boundary.",
+  "confinement": "bwrap",
+  "bwrap_bin": "/opt/ccc-agent/bin/bwrap",
+  "bwrap_proc_mode": "bind",
+
+  "_runtime_comment": "The agent binary + deps live under the real $HOME / storage that the view hides; re-expose them read-only here. Prefer dests OUTSIDE the views (e.g. install agents at /opt) to avoid bwrap mkdir'ing mountpoints into the FUSE view. 'src' or 'src:dest'.",
+  "bwrap_ro_binds": ["/home/domen/.local:/opt/agent/.local", "/storage/user/conda-envs/codex:/opt/agent/codex-env"],
+  "bwrap_setenv": {},
+
+  "_cred_comment": "Mount the agent's config/state dirs read-only from the real home so it finds them, but MASK the secret files (overmounted with /dev/null) and pass the real credential via ENV (read from the host auth file; the auth file never enters the sandbox). cred_env value: {file, json_key:'a.b.c'} to read a dotted key from a JSON auth file, or {env:'NAME'} to pass through, or a literal string.",
+  "cred_mounts": ["/home/domen/.codex", "/home/domen/.claude"],
+  "cred_mask": ["/home/domen/.codex/auth.json", "/home/domen/.claude/.credentials.json"],
+  "cred_env": {
+    "OPENAI_API_KEY": {"file": "/home/domen/.codex/auth.json", "json_key": "OPENAI_API_KEY"},
+    "ANTHROPIC_API_KEY": {"env": "ANTHROPIC_API_KEY"}
+  },
+
   "roots": [
     {
       "name": "storage_user",

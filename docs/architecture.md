@@ -11,8 +11,11 @@ untrusted: the agent process tree (codex/claude/hermes/... and children)
 trusted:   ccc-agent-run / ccc-agentctl / ccc_agent (supervisor)
            branchfs daemon + store
            ccc-fuse-sidecar (privileged FUSE broker)
-           chroot assembler (root)
 ```
+
+The supervisor launches the agent inside a **rootless bwrap sandbox** (no extra
+container privilege); bwrap is part of the untrusted-launch boundary, not a
+privileged component.
 
 The agent can *produce branch deltas*. Only the supervisor can freeze,
 inspect, commit, or abort them. This holds because:
@@ -53,37 +56,39 @@ created -> mounting -> running -> finalizing -> frozen
   already set reuses the outer session — one review unit per task, no branch
   explosion.
 
-## Contained root layout (chroot mode)
+## Contained root layout (bwrap mode)
 
-`scripts/ccc-agent-chroot.sh` (dry-run by default; `--apply` requires root)
-assembles, inside `unshare -m` so the agent cannot undo it:
+`ccc_agent.runner._bwrap_command` builds a bubblewrap invocation that assembles
+a rootless user+mount+pid namespace — no container `CAP_SYS_ADMIN`, just
+unprivileged user namespaces. The agent runs as the calling uid mapped to 0
+inside the namespace; the namespace (and all its mounts) disappears with the
+agent process. Layout the agent sees:
 
 ```text
-/run/ccc-agent/chroots/<session-id>/
-  usr bin sbin lib lib64 etc opt    read-only binds of the container image
-  proc                              fresh procfs
-  dev                               minimal nodes (null zero full urandom random tty)
-  tmp                               private tmpfs (session-scoped)
-  storage/user                      BranchFS agent view (rw)
-  home/<user>                       same view or its --home-subdir (rw)
-  run/ccc-agent/session             read-only session id marker
+/usr /etc /opt                    read-only binds of the container image
+/bin /sbin /lib /lib64            recreated as the host's usrmerge symlinks
+/proc                             bound from the container (bwrap_proc_mode:
+                                  bind|ro; "fresh" needs systempaths=unconfined)
+/dev                              bwrap minimal nodes
+/tmp                              fresh tmpfs (session-scoped)
+/storage/user                     BranchFS agent view (rw) — overlays + hides
+                                  the real underlay at the same path
+/home/<user>                      same view or its home_subdir (rw)
 ```
 
-Deliberately absent: real `/storage/*` underlays, `/__branchfs_store`,
-`daemon.sock`, `/var/run/docker.sock`, the supervisor state dir, and any
-writable path that aliases the underlay. `/home/$USER` and `/storage/user`
-bind the **same** view (alias rule), never two separate branches.
+Deliberately absent: real `/storage/*` underlays (the view `--bind` overlays
+the visible path), the BranchFS store, `daemon.sock`, `/var/run/docker.sock`,
+the supervisor state dir, and any other `/storage` mount. `/home/$USER` and
+`/storage/user` bind the **same** view (alias rule), never two branches.
 
-The agent is entered with `setpriv --reuid/--regid --init-groups` and a
-scrubbed environment (`env -i` + explicit allowlist), which drops privileges
-and closes the inherited-env escape route. Launcher code must not leak open
-directory fds pointing outside the root.
+The agent gets a scrubbed environment (`--clearenv` + an explicit `--setenv`
+allowlist). No network or proc isolation is enforced by design; the boundary
+is filesystem confinement plus PID-namespace process isolation.
 
-In **no-chroot dev mode** (what `ccc-agent-run` does today) the agent runs
-with its cwd inside the mounted view; visible system paths are unchanged.
-That mode still gives rollback/review for everything written through the
-view, but relies on CCC's container hardening for the rest — use chroot mode
-for actual YOLO agents once FUSE mounts are validated on the node.
+In **`none` mode** (debug only) the agent runs with its cwd inside the mounted
+view but nothing else isolated — **not a security boundary**: absolute-path
+writes go straight to the real underlay and bypass the view. Use it only to
+exercise the policy/commit pipeline without bwrap.
 
 ## FUSE plumbing
 
@@ -102,21 +107,22 @@ sidecar namespaces is the sidecar's Docker-inspect mode (see that repo's
 README); BranchFS mountpoints under `/__branchfs_mounts/...` must resolve to
 the same host paths in both namespaces or be translated.
 
-## Runtime validation (blocked in unprivileged dev containers)
+## Runtime validation
 
-Everything in `agent/tests` runs without FUSE. What still needs a privileged
-host (e.g. `donbot-domen-cuda10` with `ENABLE_FUSE`):
+Everything in `tests/` runs without FUSE. End-to-end validation needs a host
+with `/dev/fuse` (via `ccc-fuse-sidecar`) and unprivileged user namespaces
+(e.g. `donbot-domen-cuda10`):
 
 ```bash
-# 1. real agent mount through the sidecar
-branchfs start-daemon --base /__real/storage_user --storage /__branchfs_store/storage_user
-branchfs create agent-smoke --storage /__branchfs_store/storage_user --hide .ssh
-branchfs mount --storage /__branchfs_store/storage_user --branch agent-smoke --agent /__branchfs_mounts/storage_user
-ls /__branchfs_mounts/storage_user            # must NOT list .ssh
-# 2. chroot assembly
-scripts/ccc-agent-chroot.sh --session-id smoke-1 \
-  --view /__branchfs_mounts/storage_user --user $USER --uid $(id -u) --gid $(id -g) \
-  --apply -- sh -c 'ls /storage/user && touch /storage/user/Projects/x'
-# 3. full cycle
-ccc-agent-run --workspace /storage/user/Projects/x -- sh -c 'echo ok > done.txt'
+# bwrap confinement, real FUSE, full commit/review cycle:
+scripts/test-e2e-bwrap.sh      # in-scope auto-commit, out-of-scope pending,
+                               # /usr read-only, underlay + store hidden
+# debug pipeline without a sandbox:
+scripts/test-e2e-none.sh
 ```
+
+bwrap's only host requirements are an unprivileged-userns-capable kernel and
+the `bwrap` binary (`bwrap_bin` in config). A *fresh* `/proc` (`bwrap_proc_mode:
+fresh`) additionally needs the container's `/proc` masks cleared
+(`--security-opt systempaths=unconfined`); otherwise use the default bound
+`/proc`.

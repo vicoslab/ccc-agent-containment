@@ -24,6 +24,9 @@ class CliHarness(object):
                 "backend": "fake",
                 "user": "domen",
                 "home_subdir": "",
+                # the fake backend exercises the pipeline without a real
+                # sandbox; "none" runs the command directly (debug mode).
+                "confinement": "none",
                 "roots": [{
                     "name": "storage_user",
                     "base": self.base,
@@ -81,6 +84,31 @@ class TestMainRun(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(
             self.h.base, self.h.workspace_rel, "artifact.txt")))
         self.assertEqual(len(self.h.sessions()), 1)
+
+    def test_ignore_patterns_from_config_reach_the_session(self):
+        # Regression: cli must carry policy.ignore_patterns from config (an
+        # ignored out-of-scope write must not block the in-scope auto-commit).
+        cfg = os.path.join(self._tmp.name, "cfg-ignore.json")
+        with open(self.h.config_path) as fh:
+            data = json.load(fh)
+        data["policy"] = {"mode": "workspace-auto",
+                          "allowed_scopes": ["/storage/user/Projects/proj-a"],
+                          "ignore_patterns": ["/storage/user/.codex"]}
+        with open(cfg, "w") as fh:
+            json.dump(data, fh)
+        code = main_run([
+            "--config", cfg,
+            "--workspace", "/storage/user/Projects/proj-a",
+            "--agent", "fake",
+            "--", "sh", "-c",
+            "mkdir -p ../../.codex && echo x > ../../.codex/foo; "
+            "echo y > artifact.txt",
+        ], env={})
+        self.assertEqual(code, 0)
+        # in-scope file committed -> auto-commit happened, i.e. the ignored
+        # .codex write did NOT flag the session into pending-review
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.h.base, self.h.workspace_rel, "artifact.txt")))
 
     def test_agent_exit_code_propagates(self):
         code = main_run([

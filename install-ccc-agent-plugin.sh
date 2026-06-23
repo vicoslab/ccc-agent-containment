@@ -150,10 +150,6 @@ done
 do_it cp "$SCRIPT_DIR/shims/ccc-agent-shim.sh" "$PREFIX/shims/"
 do_it chmod +x "$PREFIX/shims/ccc-agent-shim.sh"
 
-# chroot assembler
-do_it cp "$SCRIPT_DIR/scripts/ccc-agent-chroot.sh" "$PREFIX/bin/ccc-agent-chroot"
-do_it chmod +x "$PREFIX/bin/ccc-agent-chroot"
-
 echo "  Scripts installed to $PREFIX/"
 
 # ---------------------------------------------------------------------------

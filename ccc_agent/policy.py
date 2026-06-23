@@ -51,6 +51,12 @@ DEFAULT_DENY_PATTERNS = (
     ".ccc-agent",  # session/policy/review state must never be agent-writable
 )
 
+# Always-ignored sandbox/filesystem noise (never the agent's work): NFS
+# silly-rename artifacts left when an open file is deleted/renamed on NFS.
+DEFAULT_IGNORE_PATTERNS = (
+    "*/.nfs*",
+)
+
 
 def path_matches(pattern, path):
     """Glob match for deny/hide rules against a canonical absolute path.
@@ -107,7 +113,8 @@ class DenyMatch(object):
 
 class PolicyConfig(object):
     def __init__(self, mode, allowed_scopes=(), deny_patterns=None,
-                 hide_patterns=(), max_policy_repair_attempts=2):
+                 hide_patterns=(), max_policy_repair_attempts=2,
+                 ignore_patterns=()):
         if mode not in MODES:
             raise ValueError("unknown policy mode %r (expected one of %s)"
                              % (mode, ", ".join(MODES)))
@@ -117,6 +124,12 @@ class PolicyConfig(object):
                               if deny_patterns is None else list(deny_patterns))
         self.hide_patterns = list(hide_patterns)
         self.max_policy_repair_attempts = max_policy_repair_attempts
+        # Infrastructure paths to drop from the change set entirely — neither
+        # committed nor flagged.  Used for sandbox plumbing the agent never
+        # "authored": e.g. the mountpoints bwrap creates for re-exposed cred
+        # dirs (~/.codex, ~/.claude) live under the home view and would
+        # otherwise show up as spurious out-of-scope deltas.
+        self.ignore_patterns = list(DEFAULT_IGNORE_PATTERNS) + list(ignore_patterns)
 
     @classmethod
     def from_dict(cls, data):
@@ -126,6 +139,7 @@ class PolicyConfig(object):
             deny_patterns=data.get("deny_patterns"),
             hide_patterns=data.get("hide_patterns", ()),
             max_policy_repair_attempts=data.get("max_policy_repair_attempts", 2),
+            ignore_patterns=data.get("ignore_patterns", ()),
         )
 
     def to_dict(self):
@@ -135,7 +149,30 @@ class PolicyConfig(object):
             "deny_patterns": self.deny_patterns,
             "hide_patterns": self.hide_patterns,
             "max_policy_repair_attempts": self.max_policy_repair_attempts,
+            "ignore_patterns": self.ignore_patterns,
         }
+
+
+def filter_ignored(changes, config, alias_map):
+    """Drop changes whose canonical path matches an ignore pattern.  A pattern
+    may be a glob (e.g. ``*/.nfs*``) matched against the path, or an absolute
+    path matched as an exact path OR a subtree prefix.  These are sandbox
+    plumbing, never the agent's work."""
+    patterns = list(getattr(config, "ignore_patterns", ()) or ())
+    if not patterns:
+        return list(changes)
+
+    def matched(canonical):
+        for pattern in patterns:
+            if path_matches(pattern, canonical):
+                return True
+            # subtree match only for real absolute paths (not globs)
+            if pattern.startswith("/") and not any(c in pattern for c in "*?["):
+                if is_within(canonical, pattern):
+                    return True
+        return False
+
+    return [c for c in changes if not matched(alias_map.canonicalize(c.path))]
 
 
 class PolicyDecision(object):

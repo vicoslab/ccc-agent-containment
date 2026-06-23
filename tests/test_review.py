@@ -1,0 +1,129 @@
+"""Post-session review actions (ccc_agent.ctl.Controller.review) on a
+pending-review session, driven by FakeBranchFS — no FUSE.
+
+Covers the four report actions for the operator path: accept-all, reject-all,
+file-level subset, and line-level emit-patch / apply-patch.
+"""
+
+import io
+import os
+import shutil
+import tempfile
+import unittest
+
+from ccc_agent.branchfs import FakeBranchFS
+from ccc_agent.ctl import Controller
+from ccc_agent.paths import AliasMap
+from ccc_agent.runner import RootSpec
+from ccc_agent.session import SessionStore
+
+
+class ReviewHarness(object):
+    def __init__(self, tmp):
+        self.base = os.path.join(tmp, "base")
+        os.makedirs(os.path.join(self.base, "Projects", "proj-a"))
+        self.backend = FakeBranchFS()
+        self.store = SessionStore(os.path.join(tmp, "state"))
+        self.alias = AliasMap.for_home("domen", home_subdir="")
+        spec = RootSpec(name="r", base=self.base,
+                        store=os.path.join(tmp, "store"),
+                        visible="/storage/user", home_subdir="")
+        self.session = self.store.create(
+            owner="domen", agent_kind="t", agent_command=["x"],
+            workspace="/storage/user/Projects/proj-a",
+            policy={"mode": "workspace-auto",
+                    "allowed_scopes": ["/storage/user/Projects/proj-a"]},
+            protected_roots={})
+        self.session.protected_roots = {
+            "r": spec.materialize(self.session.session_id,
+                                  self.store.state_dir)}
+        self.root = self.session.protected_roots["r"]
+        self.backend.start_daemon(self.root)
+        self.backend.create_branch(self.root)
+        self.backend.mount(self.root)
+        self.ctl = Controller(self.store, self.backend, self.alias)
+
+    def write(self, rel, content):
+        p = os.path.join(self.root.mount, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write(content)
+
+    def pending(self):
+        self.session.state = "pending-review"
+        self.store.save(self.session)
+
+    def base_has(self, rel):
+        return os.path.isfile(os.path.join(self.base, rel))
+
+
+class TestReview(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.h = ReviewHarness(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_accept_commits_everything(self):
+        self.h.write("escape.txt", "x")
+        self.h.pending()
+        session = self.h.ctl.review(self.h.session.session_id, accept=True)
+        self.assertEqual(session.state, "committed")
+        self.assertTrue(self.h.base_has("escape.txt"))
+
+    def test_reject_discards_everything(self):
+        self.h.write("escape.txt", "x")
+        self.h.pending()
+        session = self.h.ctl.review(self.h.session.session_id, reject=True)
+        self.assertEqual(session.state, "aborted")
+        self.assertFalse(self.h.base_has("escape.txt"))
+
+    def test_file_level_commits_only_chosen(self):
+        self.h.write("keep.txt", "k")
+        self.h.write("drop.txt", "d")
+        self.h.pending()
+        out = io.StringIO()
+        session = self.h.ctl.review(
+            self.h.session.session_id,
+            commit_paths=["/storage/user/keep.txt"], out=out)
+        self.assertEqual(session.state, "committed")
+        self.assertTrue(self.h.base_has("keep.txt"))
+        self.assertFalse(self.h.base_has("drop.txt"))
+
+    def test_emit_patch_shows_unified_diff(self):
+        # seed a base file, modify it in the view -> patch should show the hunk
+        with open(os.path.join(self.h.base, "Projects", "proj-a", "f.txt"),
+                  "w") as fh:
+            fh.write("old line\n")
+        self.h.write("Projects/proj-a/f.txt", "new line\n")
+        self.h.pending()
+        out = io.StringIO()
+        self.h.ctl.review(self.h.session.session_id, emit_patch=True, out=out)
+        patch = out.getvalue()
+        self.assertIn("-old line", patch)
+        self.assertIn("+new line", patch)
+        self.assertIn("b/Projects/proj-a/f.txt", patch)
+
+    @unittest.skipUnless(shutil.which("patch"), "patch(1) not available")
+    def test_apply_patch_applies_hunks_to_base(self):
+        with open(os.path.join(self.h.base, "Projects", "proj-a", "f.txt"),
+                  "w") as fh:
+            fh.write("old line\n")
+        self.h.write("Projects/proj-a/f.txt", "new line\n")
+        self.h.pending()
+        emit = io.StringIO()
+        self.h.ctl.review(self.h.session.session_id, emit_patch=True, out=emit)
+        patch_file = os.path.join(self._tmp.name, "changes.patch")
+        with open(patch_file, "w") as fh:
+            fh.write(emit.getvalue())
+        session = self.h.ctl.review(self.h.session.session_id,
+                                    apply_patch=patch_file, out=io.StringIO())
+        self.assertEqual(session.state, "committed")
+        with open(os.path.join(self.h.base, "Projects", "proj-a",
+                               "f.txt")) as fh:
+            self.assertEqual(fh.read(), "new line\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

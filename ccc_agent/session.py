@@ -180,8 +180,8 @@ class SessionStore(object):
         <state_dir>/sessions/<session-id>/session.json
         <state_dir>/reviews/<session-id>/...
 
-    The state dir should live on shared storage that the *agent cannot see*
-    from inside its chroot (it is covered by the default ``.ccc-agent`` deny
+    The state dir should live on storage that the *agent cannot see* from
+    inside its sandbox (it is covered by the default ``.ccc-agent`` deny
     pattern as defense in depth if it ever is visible).
     """
 

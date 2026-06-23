@@ -13,6 +13,17 @@ CTL="${CCC_AGENTCTL:-/opt/ccc-agent/bin/ccc-agentctl}"
 [ -n "${CCC_AGENT_SESSION:-}" ] || exit 0
 [ -x "$CTL" ] || exit 0
 
+# Per-turn control: signal end-of-turn to the supervisor over the control
+# socket (the in-sandbox agent can't reach the store). It commits in-scope
+# changes and exits 0; on out-of-scope it exits 2 with the paths + approval
+# token on stderr so the agent asks the user, then runs approve-turn.
+if [ -n "${CCC_AGENT_CONTROL_SOCK:-}" ]; then
+    rc=0
+    "$CTL" finalize-turn || rc=$?
+    exit "$rc"
+fi
+
+# Fallback (no control socket — dev/none mode): store-based bounded self-repair.
 rc=0
 "$CTL" check-before-final "$CCC_AGENT_SESSION" 1>&2 || rc=$?
 [ "$rc" -ne 2 ] || exit 2   # dirty + budget left: agent should repair

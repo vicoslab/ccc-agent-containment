@@ -1,0 +1,10 @@
+# Codex config for CCC agent containment (~/.codex/config.toml, or a profile).
+# Codex has no Stop hook; it calls a `notify` program on events. Point it at the
+# CCC notify adapter so end-of-turn signals the supervisor (commits in-scope
+# changes). NOTE: notify is fire-and-forget — codex does not wait on it or honor
+# its exit code, so it CANNOT block a turn for out-of-scope approval (those defer
+# to session-end review). For blocking per-turn approval use `codex exec` (one
+# turn per process -> the supervisor's process-exit finalize applies) or Claude
+# Code (real Stop hook).
+
+notify = ["/opt/ccc-agent/hooks/codex-notify.sh"]

@@ -177,7 +177,7 @@ class TestRunSession(unittest.TestCase):
         self.assertEqual(self.h.backend.branch_state(root), "frozen")
 
 
-class TestChrootConfinement(unittest.TestCase):
+class TestConfinementModes(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.h = RunnerHarness(self._tmp.name)
@@ -185,59 +185,15 @@ class TestChrootConfinement(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _chroot_config(self, argv, **kw):
-        return self.h.config(argv, confinement="chroot",
-                             chroot_script="/opt/ccc-agent/ccc-agent-chroot.sh",
-                             agent_uid=2094, agent_gid=2094, **kw)
-
-    def test_chroot_confinement_requires_script_and_ids(self):
-        with self.assertRaises(ValueError):
-            self.h.config(["true"], confinement="chroot")
-
     def test_unknown_confinement_rejected(self):
         with self.assertRaises(ValueError):
             self.h.config(["true"], confinement="jail")
 
-    def test_chroot_mode_mounts_allow_other_and_wraps_command(self):
-        seen = {}
-
-        def fake_run(argv, **kwargs):
-            seen["argv"] = list(argv)
-            seen["cwd"] = kwargs.get("cwd")
-            return subprocess.CompletedProcess(argv, 0)
-
-        # Record whether the view was mounted with allow_other.
-        orig_mount = self.h.backend.mount
-        mounts = []
-
-        def spy_mount(root, agent=True, allow_other=False):
-            mounts.append(allow_other)
-            return orig_mount(root, agent=agent, allow_other=allow_other)
-
-        self.h.backend.mount = spy_mount
-
-        with mock.patch.object(subprocess, "run", side_effect=fake_run):
-            session = run_session(self._chroot_config(["my-agent", "--flag"]))
-
-        self.assertTrue(all(mounts) and mounts, "agent mount must allow_other")
-        argv = seen["argv"]
-        self.assertEqual(argv[0], "/opt/ccc-agent/ccc-agent-chroot.sh")
-        self.assertIn("--apply", argv)
-        self.assertIn("--session-id", argv)
-        self.assertIn(session.session_id, argv)
-        self.assertIn("--uid", argv)
-        self.assertIn("2094", argv)
-        # workspace canonicalized into the storage_user namespace
-        self.assertIn("--workdir", argv)
-        self.assertIn("/storage/user/Projects/proj-a", argv)
-        # the real agent command follows the -- separator
-        sep = argv.index("--")
-        self.assertEqual(argv[sep + 1:], ["my-agent", "--flag"])
-        # no host-side cwd is forced in chroot mode (the assembler cd's)
-        self.assertIsNone(seen["cwd"])
-        self.assertTrue(any(e.get("kind") == "chroot-launch"
-                            or e.get("event") == "chroot-launch"
-                            for e in session.events))
+    def test_chroot_confinement_no_longer_supported(self):
+        # chroot was removed (needed a privileged container); it must now be
+        # rejected like any other unknown mode.
+        with self.assertRaises(ValueError):
+            self.h.config(["true"], confinement="chroot")
 
     def test_none_confinement_runs_command_directly(self):
         # Regression: default mode must not wrap the command.
@@ -250,6 +206,203 @@ class TestChrootConfinement(unittest.TestCase):
         with mock.patch.object(subprocess, "run", side_effect=fake_run):
             run_session(self.h.config(["my-agent", "--flag"]))
         self.assertEqual(seen["argv"], ["my-agent", "--flag"])
+
+
+class TestBwrapConfinement(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.h = RunnerHarness(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _bwrap_config(self, argv, **kw):
+        return self.h.config(argv, confinement="bwrap",
+                             bwrap_bin="/opt/ccc-agent/bin/bwrap", **kw)
+
+    def test_bwrap_needs_no_script_or_uid(self):
+        # Unlike chroot, bwrap is rootless: it must not require uid/gid/script.
+        cfg = self.h.config(["true"], confinement="bwrap")
+        self.assertEqual(cfg.confinement, "bwrap")
+
+    def test_bwrap_rejects_bad_proc_mode(self):
+        with self.assertRaises(ValueError):
+            self.h.config(["true"], confinement="bwrap",
+                          bwrap_proc_mode="magic")
+
+    def test_bwrap_mode_builds_sandbox_and_wraps_command(self):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            seen["cwd"] = kwargs.get("cwd")
+            return subprocess.CompletedProcess(argv, 0)
+
+        # bwrap is same-uid, so the view must NOT be mounted allow_other.
+        orig_mount = self.h.backend.mount
+        mounts = []
+
+        def spy_mount(root, agent=True, allow_other=False):
+            mounts.append(allow_other)
+            return orig_mount(root, agent=agent, allow_other=allow_other)
+
+        self.h.backend.mount = spy_mount
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self._bwrap_config(["my-agent", "--flag"]))
+
+        self.assertTrue(mounts and not any(mounts),
+                        "bwrap is same-uid; allow_other must stay off")
+        argv = seen["argv"]
+        self.assertEqual(argv[0], "/opt/ccc-agent/bin/bwrap")
+        self.assertIn("--unshare-user", argv)
+        self.assertIn("--unshare-pid", argv)
+        # OS exposed read-only (first --ro-bind is /usr)
+        i = argv.index("--ro-bind")
+        self.assertEqual(argv[i + 1], "/usr")
+        # the view is bound rw at its visible path and at $HOME
+        self.assertIn("/storage/user", argv)
+        self.assertIn("/home/domen", argv)
+        # workspace is the sandbox cwd via --chdir
+        ci = argv.index("--chdir")
+        self.assertEqual(argv[ci + 1], "/storage/user/Projects/proj-a")
+        # the real agent command follows the -- separator
+        sep = argv.index("--")
+        self.assertEqual(argv[sep + 1:], ["my-agent", "--flag"])
+        # no host-side cwd is forced (bwrap --chdir handles it)
+        self.assertIsNone(seen["cwd"])
+        self.assertTrue(any(e.get("kind") == "bwrap-launch"
+                            or e.get("event") == "bwrap-launch"
+                            for e in session.events))
+
+    def test_bwrap_ro_binds_and_setenv_after_view(self):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        # Use the harness base dir (exists) as a re-exposed runtime path so the
+        # os.path.exists() guard passes.
+        runtime = self.h.base
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            run_session(self._bwrap_config(
+                ["true"], bwrap_ro_binds=[runtime, "/no/such/path"],
+                bwrap_setenv={"OPENAI_API_KEY": "sek-test"}))
+        argv = seen["argv"]
+        # the existing runtime path is re-exposed read-only; the missing one is
+        # silently skipped
+        self.assertIn(runtime, argv)
+        self.assertNotIn("/no/such/path", argv)
+        # the ro-bind for the runtime must come AFTER the view bind so it wins
+        view_i = argv.index("/storage/user")
+        ro_i = max(k for k in range(len(argv) - 1)
+                   if argv[k] == "--ro-bind" and argv[k + 1] == runtime)
+        self.assertGreater(ro_i, view_i)
+        # setenv is passed through
+        si = [k for k in range(len(argv) - 1)
+              if argv[k] == "--setenv" and argv[k + 1] == "OPENAI_API_KEY"]
+        self.assertTrue(si and argv[si[0] + 2] == "sek-test")
+
+    def test_bwrap_binds_control_socket_and_sets_env(self):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self._bwrap_config(["my-agent"]))
+        argv = seen["argv"]
+        sock = "/run/ccc-agent/control.sock"
+        # the host socket is bind-mounted to the fixed in-sandbox path
+        bind_dests = [argv[k + 2] for k in range(len(argv) - 2)
+                      if argv[k] == "--bind"]
+        self.assertIn(sock, bind_dests)
+        # the in-sandbox env points the hook at that socket + a token
+        env = {argv[k + 1]: argv[k + 2] for k in range(len(argv) - 2)
+               if argv[k] == "--setenv"}
+        self.assertEqual(env.get("CCC_AGENT_CONTROL_SOCK"), sock)
+        self.assertTrue(env.get("CCC_AGENT_CONTROL_TOKEN"))
+        # everything is before the -- command separator
+        sep = argv.index("--")
+        self.assertEqual(argv[sep + 1:], ["my-agent"])
+        self.assertTrue(any(e.get("kind") == "control-server"
+                            or e.get("event") == "control-server"
+                            for e in session.events))
+
+    def test_bwrap_credentials_mount_mask_and_env(self):
+        cred_dir = os.path.join(self._tmp.name, "home", ".codex")
+        os.makedirs(cred_dir)
+        auth = os.path.join(cred_dir, "auth.json")
+        with open(auth, "w") as fh:
+            json.dump({"tokens": {"access": "sek-xyz"}}, fh)
+
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            run_session(self._bwrap_config(
+                ["a"], cred_mounts=[cred_dir], cred_mask=[auth],
+                cred_env={"OPENAI_API_KEY":
+                          {"file": auth, "json_key": "tokens.access"}}))
+        argv = seen["argv"]
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        # cred dir re-exposed read-only
+        self.assertIn(("--ro-bind", cred_dir, cred_dir), triples)
+        # secret file masked with /dev/null
+        self.assertIn(("--ro-bind", "/dev/null", auth), triples)
+        # credential extracted from the host auth file and passed via env
+        self.assertIn(("--setenv", "OPENAI_API_KEY", "sek-xyz"), triples)
+
+    def test_per_turn_off_starts_no_control_server(self):
+        # none mode (per_turn defaults off): no control env injected.
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["env"] = dict(kwargs.get("env") or {})
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self.h.config(["true"]))
+        self.assertNotIn("CCC_AGENT_CONTROL_SOCK", seen["env"])
+        self.assertFalse(any(e.get("kind") == "control-server"
+                             for e in session.events))
+
+    def test_per_turn_opt_in_for_none_sets_host_socket_env(self):
+        # `none` debug mode can opt into per-turn; the hook reaches the host
+        # socket directly (no sandbox remap).
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["env"] = dict(kwargs.get("env") or {})
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            run_session(self.h.config(["true"], per_turn=True))
+        self.assertIn("CCC_AGENT_CONTROL_SOCK", seen["env"])
+        self.assertTrue(seen["env"].get("CCC_AGENT_CONTROL_TOKEN"))
+
+    def test_bwrap_proc_mode_selects_flag(self):
+        cases = {"bind": "--bind", "ro": "--ro-bind", "fresh": "--proc"}
+        for mode, flag in cases.items():
+            seen = {}
+
+            def fake_run(argv, **kwargs):
+                seen["argv"] = list(argv)
+                return subprocess.CompletedProcess(argv, 0)
+
+            with mock.patch.object(subprocess, "run", side_effect=fake_run):
+                run_session(self._bwrap_config(["true"], bwrap_proc_mode=mode))
+            argv = seen["argv"]
+            self.assertIn("/proc", argv, "proc not mounted in mode %s" % mode)
+            found = any(argv[k] == flag and argv[k + 1] == "/proc"
+                        for k in range(len(argv) - 1))
+            self.assertTrue(found, "mode %s missing %s /proc" % (mode, flag))
 
 
 if __name__ == "__main__":

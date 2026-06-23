@@ -5,7 +5,6 @@ Tests all components without requiring FUSE or root:
   - soft sandbox tracking mode (pre-run snapshot diff)
   - plugin installer --no-hooks (file layout verification)
   - hook scripts (syntax checks + dry-run behavior)
-  - chroot script dry-run plan output
 """
 
 import json
@@ -339,55 +338,6 @@ class TestHookScripts(unittest.TestCase):
             env={k: v for k, v in os.environ.items()
                  if k not in ("CCC_AGENT_SESSION",)})
         self.assertEqual(result.returncode, 0)
-
-
-# ---------------------------------------------------------------------------
-# § 4  Chroot script dry-run
-# ---------------------------------------------------------------------------
-class TestChrootScript(unittest.TestCase):
-
-    CHROOT_SCRIPT = os.path.join(SCRIPTS, "ccc-agent-chroot.sh")
-
-    def test_syntax_check(self):
-        result = subprocess.run(
-            ["bash", "-n", self.CHROOT_SCRIPT], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_dry_run_plan_output(self):
-        result = subprocess.run([
-            "bash", self.CHROOT_SCRIPT,
-            "--session-id", "agent-20260618T000000Z-test0001",
-            "--view", "/tmp",
-            "--user", "testuser",
-            "--uid", "9999",
-            "--gid", "9999",
-            "--", "bash", "-c", "echo hello",
-        ], capture_output=True, text=True)
-        combined = result.stdout + result.stderr
-        self.assertEqual(result.returncode, 0, combined)
-        self.assertIn("dry-run", combined)
-        self.assertIn("proc", combined)
-        self.assertIn("storage/user", combined)
-
-    def test_invalid_session_id_rejected(self):
-        result = subprocess.run([
-            "bash", self.CHROOT_SCRIPT,
-            "--session-id", "bad/session/id",
-            "--view", "/tmp",
-            "--user", "testuser",
-            "--", "bash", "-c", "echo hello",
-        ], capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("invalid session", result.stderr)
-
-    def test_missing_session_id_rejected(self):
-        result = subprocess.run([
-            "bash", self.CHROOT_SCRIPT,
-            "--view", "/tmp",
-            "--user", "testuser",
-            "--", "bash", "-c", "echo hello",
-        ], capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
 
 
 # ---------------------------------------------------------------------------

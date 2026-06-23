@@ -1,6 +1,5 @@
-"""Tests for the shell scaffolding: chroot assembler (dry-run), launch shim,
-hook adapters. All run unprivileged — --apply paths are exercised only as
-syntax/plan checks here; runtime chroot validation needs a privileged host."""
+"""Tests for the shell scaffolding: launch shim and hook adapters. All run
+unprivileged (syntax and behavior checks only)."""
 
 import os
 import stat
@@ -10,7 +9,6 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT_DIR = os.path.dirname(HERE)
-CHROOT_SH = os.path.join(AGENT_DIR, "scripts", "ccc-agent-chroot.sh")
 SHIM_SH = os.path.join(AGENT_DIR, "shims", "ccc-agent-shim.sh")
 HOOKS = [os.path.join(AGENT_DIR, "hooks", name)
          for name in ("claude-stop-hook.sh", "codex-stop-hook.sh",
@@ -22,62 +20,11 @@ STOP_HOOKS = [os.path.join(AGENT_DIR, "hooks", name)
 
 class TestShellSyntax(unittest.TestCase):
     def test_all_scripts_parse(self):
-        for script in [CHROOT_SH, SHIM_SH] + HOOKS:
+        for script in [SHIM_SH] + HOOKS:
             proc = subprocess.run(["bash", "-n", script],
                                   stderr=subprocess.PIPE, text=True)
             self.assertEqual(proc.returncode, 0,
                              "%s: %s" % (script, proc.stderr))
-
-
-class TestChrootDryRun(unittest.TestCase):
-    def run_dry(self, *extra):
-        argv = ["bash", CHROOT_SH,
-                "--session-id", "agent-test-1",
-                "--view", "/__branchfs_mounts/storage_user",
-                "--user", "domen", "--uid", "1000", "--gid", "1000",
-                *extra,
-                "--", "codex", "exec", "task"]
-        proc = subprocess.run(argv, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        return proc.stdout
-
-    def test_plan_contains_views_and_boundaries(self):
-        out = self.run_dry()
-        self.assertIn("# dry-run", out)
-        self.assertIn(
-            "bind-rw /__branchfs_mounts/storage_user -> "
-            "/run/ccc-agent/chroots/agent-test-1/storage/user", out)
-        # home alias from the same view (home_subdir empty)
-        self.assertIn("/home/domen", out)
-        self.assertIn("NOT exposed: real underlay, BranchFS store", out)
-        self.assertIn("setpriv --reuid=1000 --regid=1000", out)
-        self.assertIn("CCC_AGENT_SESSION=agent-test-1", out)
-
-    def test_home_subdir_plan(self):
-        out = self.run_dry("--home-subdir", "domen")
-        self.assertIn(
-            "bind-rw /__branchfs_mounts/storage_user/domen -> "
-            "/run/ccc-agent/chroots/agent-test-1/home/domen", out)
-
-    def test_workdir_plan(self):
-        out = self.run_dry("--workdir", "/storage/user/Projects/proj-a")
-        self.assertIn("workdir (inside chroot): /storage/user/Projects/proj-a",
-                      out)
-
-    def test_dry_run_performs_no_mounts(self):
-        # the dry run must not create the chroot directory
-        out = self.run_dry()
-        self.assertTrue(out)
-        self.assertFalse(os.path.exists(
-            "/run/ccc-agent/chroots/agent-test-1"))
-
-    def test_rejects_path_traversal_session_id(self):
-        proc = subprocess.run(
-            ["bash", CHROOT_SH, "--session-id", "../escape",
-             "--view", "/v", "--user", "u", "--", "true"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.assertNotEqual(proc.returncode, 0)
 
 
 class TestShim(unittest.TestCase):
@@ -188,6 +135,51 @@ class TestStopHookSelfRepair(unittest.TestCase):
             proc = self.run_hook(hook)
             self.assertEqual(proc.returncode, 0, "%s: %s" % (hook, proc.stderr))
             self.assertIn("CALLED finish-turn", proc.stdout)
+
+
+class TestStopHookControlSocket(unittest.TestCase):
+    """When CCC_AGENT_CONTROL_SOCK is set the hook signals the supervisor via
+    `ccc-agentctl finalize-turn` and propagates its exit code, instead of the
+    store-based self-repair path."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ctl = os.path.join(self._tmp.name, "ccc-agentctl")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def fake_ctl(self, finalize_rc):
+        with open(self.ctl, "w") as fh:
+            fh.write("#!/bin/sh\n"
+                     "echo \"CALLED $1\" 1>&2\n"
+                     "if [ \"$1\" = finalize-turn ]; then exit %d; fi\n"
+                     "exit 0\n" % finalize_rc)
+        os.chmod(self.ctl, 0o755)
+
+    def run_hook(self, hook):
+        env = {"PATH": "/usr/bin:/bin",
+               "CCC_AGENT_SESSION": "agent-x",
+               "CCC_AGENTCTL": self.ctl,
+               "CCC_AGENT_CONTROL_SOCK": "/run/ccc-agent/control.sock"}
+        return subprocess.run(["sh", hook], env=env,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+
+    def test_committed_turn_lets_stop_proceed(self):
+        for hook in STOP_HOOKS:
+            self.fake_ctl(0)
+            proc = self.run_hook(hook)
+            self.assertEqual(proc.returncode, 0, "%s: %s" % (hook, proc.stderr))
+            self.assertIn("CALLED finalize-turn", proc.stderr)
+            self.assertNotIn("check-before-final", proc.stderr)
+
+    def test_needs_approval_blocks_stop(self):
+        for hook in STOP_HOOKS:
+            self.fake_ctl(2)
+            proc = self.run_hook(hook)
+            self.assertEqual(proc.returncode, 2, "%s: %s" % (hook, proc.stderr))
+            self.assertIn("CALLED finalize-turn", proc.stderr)
 
 
 class TestHooksAreNoopsOutsideSessions(unittest.TestCase):

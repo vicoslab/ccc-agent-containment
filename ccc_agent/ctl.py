@@ -6,8 +6,11 @@ Commit authority stays here, in trusted supervisor code, behind explicit
 operator commands (or the runner's policy decision).
 """
 
+import difflib
 import json
 import os
+import shutil
+import subprocess
 import sys
 
 from .policy import PolicyConfig, classify
@@ -120,6 +123,123 @@ class Controller(object):
             except Exception:
                 pass
         session.transition("aborted")
+        self.store.save(session)
+        return session
+
+    # -- selective / line-level review (post-session, branch unmounted) -----
+    def _store_paths(self, root, change):
+        """(rel, delta-file-in-store, base-file) for a change."""
+        visible = self.alias_map.canonicalize(root.visible)
+        rel = os.path.relpath(self.alias_map.canonicalize(change.path), visible)
+        delta = os.path.join(root.store, "branches", root.branch, "files", rel)
+        return rel, delta, os.path.join(root.base, rel)
+
+    def _apply_change_from_store(self, root, change):
+        """Apply one change to base by reading its delta from the store (the
+        branch is not mounted post-session)."""
+        _rel, delta, base = self._store_paths(root, change)
+        if change.op == "D":
+            if os.path.islink(base) or os.path.isfile(base):
+                os.unlink(base)
+            elif os.path.isdir(base):
+                shutil.rmtree(base)
+        elif change.kind == "dir":
+            os.makedirs(base, exist_ok=True)
+        elif os.path.exists(delta):
+            parent = os.path.dirname(base)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            shutil.copy2(delta, base)
+
+    def _changes(self, session):
+        out = []
+        for _name, root in sorted(session.protected_roots.items()):
+            for change in self.backend.status(root):
+                out.append((root, change))
+        return out
+
+    def _emit_patch(self, changes, out):
+        """Unified base-vs-view diff the user can prune to a hunk subset, then
+        re-apply with `review --apply-patch`."""
+        for root, change in changes:
+            rel, delta, base = self._store_paths(root, change)
+            old = []
+            if os.path.isfile(base):
+                with open(base, "r", errors="replace") as fh:
+                    old = fh.readlines()
+            new = []
+            if change.op != "D" and os.path.isfile(delta):
+                with open(delta, "r", errors="replace") as fh:
+                    new = fh.readlines()
+            for line in difflib.unified_diff(old, new,
+                                             fromfile="a/" + rel,
+                                             tofile="b/" + rel):
+                out.write(line if line.endswith("\n") else line + "\n")
+
+    def review(self, session_id, accept=False, reject=False, commit_paths=None,
+               emit_patch=False, apply_patch=None, out=None):
+        """Post-session review of a pending/frozen session's change set.
+
+        Default browses the diff.  ``accept`` commits everything, ``reject``
+        discards everything, ``commit_paths`` commits a file-level subset (the
+        rest are discarded), ``emit_patch`` prints a base-vs-view unified diff,
+        and ``apply_patch`` applies a (possibly pruned) patch to base for
+        line-level control.
+        """
+        out = out or sys.stdout
+        if accept:
+            return self.commit(session_id)
+        if reject:
+            return self.abort(session_id)
+        session = self._load(session_id)
+        self._require_state(session, ("pending-review", "frozen"), "review")
+        changes = self._changes(session)
+
+        if emit_patch:
+            self._emit_patch(changes, out)
+            return session
+
+        if apply_patch:
+            # patch the base directly (one base per root; the primary root is
+            # the common case), then discard the now-stale branch deltas.
+            base = sorted(session.protected_roots.values(),
+                          key=lambda r: r.name)[0].base
+            with open(apply_patch) as fh:
+                proc = subprocess.run(["patch", "-p1", "-d", base],
+                                      stdin=fh, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, text=True)
+            out.write(proc.stdout)
+            if proc.returncode != 0:
+                raise ControlError("patch failed (rc=%d)" % proc.returncode)
+            return self._finish_selective(session, "patch applied")
+
+        if commit_paths:
+            chosen = set(commit_paths)
+            applied = []
+            for root, change in changes:
+                if change.path in chosen:
+                    self._apply_change_from_store(root, change)
+                    applied.append(change.path)
+            out.write("committed %d path(s); discarding the rest\n"
+                      % len(applied))
+            return self._finish_selective(session, "file-level commit")
+
+        return self.diff(session_id, out=out)
+
+    def _finish_selective(self, session, detail):
+        """After a selective/patch apply to base, discard the branch deltas and
+        mark the session committed."""
+        for name, root in sorted(session.protected_roots.items()):
+            try:
+                self.backend.abort(root)
+            except Exception:
+                pass
+            try:
+                self.backend.unmount(root)
+            except Exception:
+                pass
+            session.add_event("selective-commit", "%s: %s" % (name, detail))
+        session.transition("committed")
         self.store.save(session)
         return session
 
