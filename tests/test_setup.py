@@ -1,0 +1,130 @@
+"""Tests for ccc-agent-setup installation wiring."""
+
+import os
+import subprocess
+import tempfile
+import unittest
+
+from ccc_agent import setup as setup_mod
+
+
+class TestCondaShimActivation(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.home = os.path.join(self.tmp, "home")
+        self.shimdir = os.path.join(self.tmp, "ccc-agent-shims")
+        self.conda = os.path.join(self.tmp, "conda-env")
+        self.conda_bin = os.path.join(self.conda, "bin")
+        os.makedirs(self.home)
+        os.makedirs(self.conda_bin)
+        self.launcher = os.path.join(self.tmp, "ccc-agent-launch")
+        with open(self.launcher, "w") as fh:
+            fh.write("#!/bin/sh\necho LAUNCH:$*\n")
+        os.chmod(self.launcher, 0o755)
+        for agent in ("codex", "claude"):
+            real = os.path.join(self.conda_bin, agent)
+            with open(real, "w") as fh:
+                fh.write("#!/bin/sh\necho CONDA-REAL:%s:$*\n" % agent)
+            os.chmod(real, 0o755)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_conda_activation_hook_puts_shims_before_env_bin(self):
+        config = os.path.join(self.tmp, "config.json")
+        rc = setup_mod.main([
+            "--user",
+            "--config", config,
+            "--state-dir", os.path.join(self.tmp, "state"),
+            "--no-hooks",
+            "--enable-shims",
+            "--link-dir", self.shimdir,
+            "--conda-prefix", self.conda,
+            "--conda-activate-shims",
+        ])
+        self.assertEqual(rc, 0)
+        activate = os.path.join(
+            self.conda, "etc", "conda", "activate.d", "ccc-agent-shims.sh")
+        deactivate = os.path.join(
+            self.conda, "etc", "conda", "deactivate.d", "ccc-agent-shims.sh")
+        self.assertTrue(os.path.isfile(activate))
+        self.assertTrue(os.path.isfile(deactivate))
+
+        for agent in ("codex", "claude"):
+            proc = subprocess.run(
+                ["sh", "-c", ". \"$ACTIVATE\" && command -v \"$AGENT\" && \"$AGENT\" do thing"],
+                env={
+                    "PATH": "%s:/usr/bin:/bin" % self.conda_bin,
+                    "HOME": self.home,
+                    "ACTIVATE": activate,
+                    "AGENT": agent,
+                    "CCC_AGENT_LAUNCH": self.launcher,
+                },
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            lines = proc.stdout.splitlines()
+            self.assertEqual(lines[0], os.path.join(self.shimdir, agent))
+            self.assertIn(
+                "LAUNCH:--agent %s -- %s do thing" %
+                (agent, os.path.join(self.conda_bin, agent)),
+                proc.stdout)
+
+        proc = subprocess.run(
+            ["sh", "-c", ". \"$ACTIVATE\" && . \"$DEACTIVATE\" && command -v codex"],
+            env={
+                "PATH": "%s:/usr/bin:/bin" % self.conda_bin,
+                "HOME": self.home,
+                "ACTIVATE": activate,
+                "DEACTIVATE": deactivate,
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), os.path.join(self.conda_bin, "codex"))
+
+
+class TestSetupConfig(unittest.TestCase):
+    def test_system_config_keeps_agent_state_writable_by_default(self):
+        cfg = setup_mod.build_config(
+            mode="system",
+            user="domen",
+            home="/home/domen",
+            branchfs_bin="/usr/local/bin/branchfs",
+            bwrap_bin="/usr/bin/bwrap",
+            state_dir="/storage/user/.ccc-agent",
+            storage_root="/storage",
+            branch_store="/opt/branchfs_branches",
+            container_name="domen-cuda10",
+        )
+
+        self.assertEqual(cfg["cred_mounts"], [])
+        ignore = cfg["policy"]["ignore_patterns"]
+        self.assertIn("/storage/user/domen-cuda10/.codex*", ignore)
+        self.assertIn("/storage/user/domen-cuda10/.claude*", ignore)
+        self.assertEqual(cfg["roots"][0]["visible"], "/storage")
+        self.assertEqual(cfg["roots"][0]["home_subdir"], "user/domen-cuda10")
+
+    def test_user_config_keeps_agent_state_writable_by_default(self):
+        cfg = setup_mod.build_config(
+            mode="user",
+            user="domen",
+            home="/home/domen",
+            branchfs_bin="branchfs",
+            bwrap_bin="bwrap",
+            state_dir="/home/domen/.ccc-agent",
+        )
+
+        self.assertEqual(cfg["cred_mounts"], [])
+        ignore = cfg["policy"]["ignore_patterns"]
+        self.assertIn("/home/domen/.codex*", ignore)
+        self.assertIn("/home/domen/.claude*", ignore)
+
+
+if __name__ == "__main__":
+    unittest.main()
