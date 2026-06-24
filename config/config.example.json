@@ -1,37 +1,46 @@
 {
-  "_comment": "ccc-agent runtime config. Install (root-owned, world-readable) at /etc/ccc-agent/config.json or /opt/ccc-agent/config/config.json. The agent must never be able to write this file or anything under state_dir.",
-  "state_dir": "/storage/user/.ccc-agent",
+  "_comment": "ccc-agent runtime config. Install (root-owned, world-readable) at /etc/ccc-agent/config.json or /opt/ccc-agent/config/config.json. The agent must never be able to write this file or anything under state_dir. In CCC images this file is generated at container startup by ccc-agent-setup (it needs runtime-only paths: the container name + /storage layout), NOT at image build.",
+  "state_dir": "/opt/ccc-agent/state",
   "backend": "branchfs",
-  "branchfs_bin": "/opt/ccc-agent/bin/branchfs",
+  "branchfs_bin": "/usr/local/bin/branchfs",
   "user": "domen",
-  "home_subdir": "",
+
+  "_alias_comment": "home_subdir feeds the policy alias /home/<user> -> /storage/user/<home_subdir>. CCC mounts the user home to the same bytes as /storage/user/<container>, so set this to the container name to dedup them in policy.",
+  "home_subdir": "domen-cuda10",
+  "workspace": "/home/domen",
 
   "_confinement_comment": "bwrap = real rootless sandbox (default). none = debug only, NOT a boundary.",
   "confinement": "bwrap",
-  "bwrap_bin": "/opt/ccc-agent/bin/bwrap",
+  "bwrap_bin": "/usr/bin/bwrap",
   "bwrap_proc_mode": "bind",
 
   "_runtime_comment": "The agent binary + deps live under the real $HOME / storage that the view hides; re-expose them read-only here. Prefer dests OUTSIDE the views (e.g. install agents at /opt) to avoid bwrap mkdir'ing mountpoints into the FUSE view. 'src' or 'src:dest'.",
-  "bwrap_ro_binds": ["/home/domen/.local:/opt/agent/.local", "/storage/user/conda-envs/codex:/opt/agent/codex-env"],
+  "bwrap_ro_binds": ["/home/domen/.local:/opt/agent/.local"],
   "bwrap_setenv": {},
 
-  "_cred_comment": "Mount the agent's config/state dirs read-only from the real home so it finds them, but MASK the secret files (overmounted with /dev/null) and pass the real credential via ENV (read from the host auth file; the auth file never enters the sandbox). cred_env value: {file, json_key:'a.b.c'} to read a dotted key from a JSON auth file, or {env:'NAME'} to pass through, or a literal string.",
+  "_cred_comment": "Mount the agent's config/state dirs read-only from the real home so it finds them. OAuth-subscription logins authenticate from the token FILE, which must stay readable (do NOT mask it); cred_mask + cred_env are only for API-key auth (mask the file, pass the key by env).",
   "cred_mounts": ["/home/domen/.codex", "/home/domen/.claude"],
-  "cred_mask": ["/home/domen/.codex/auth.json", "/home/domen/.claude/.credentials.json"],
-  "cred_env": {
-    "OPENAI_API_KEY": {"file": "/home/domen/.codex/auth.json", "json_key": "OPENAI_API_KEY"},
-    "ANTHROPIC_API_KEY": {"env": "ANTHROPIC_API_KEY"}
-  },
+  "cred_mask": [],
+  "cred_env": {},
 
+  "_roots_comment": "ONE BranchFS root over the whole of /storage: base is the real read-through underlay, store is a node-local delta dir OUTSIDE /storage, visible is where the branch is mounted back inside the sandbox. home_subdir (relative to the branch) is bind-mounted to /home/<user>, so the home and /storage/user/<container> share a single branch instead of being overlaid twice.",
   "roots": [
     {
-      "name": "storage_user",
-      "base": "/__real/storage_user",
-      "store": "/__branchfs_store/storage_user",
-      "visible": "/storage/user",
-      "home_subdir": "",
-      "hide_paths": [".ssh", ".gnupg", ".netrc", ".aws", ".kube", ".docker/config.json", ".ccc-agent"]
+      "name": "storage",
+      "base": "/storage",
+      "store": "/opt/branchfs_branches/storage",
+      "visible": "/storage",
+      "home_subdir": "user/domen-cuda10",
+      "hide_paths": ["user/domen-cuda10/.ssh", "user/domen-cuda10/.gnupg",
+                     "user/domen-cuda10/.netrc", "user/domen-cuda10/.aws",
+                     "user/domen-cuda10/.kube", "user/domen-cuda10/.docker/config.json"]
     }
   ],
-  "hide_patterns": [".env", ".env.*", "*.pem", "id_rsa*", "id_ed25519*", "credentials.json"]
+  "hide_patterns": [".env", ".env.*", "*.pem", "id_rsa*", "id_ed25519*", "credentials.json"],
+  "policy": {
+    "mode": "workspace-auto",
+    "_policy_comment": "workspace-auto: changes under the workspace (the home) auto-commit; anything else under /storage (datasets, group, other users) is read-through but flagged for review on write. Agent config/cache churn is ignored.",
+    "ignore_patterns": ["/storage/user/domen-cuda10/.codex*", "/storage/user/domen-cuda10/.claude*",
+                        "/storage/user/domen-cuda10/.config*", "/storage/user/domen-cuda10/.cache*"]
+  }
 }

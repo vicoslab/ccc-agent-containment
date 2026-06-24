@@ -58,26 +58,55 @@ def _write_json(path, data):
     os.chmod(path, 0o644)
 
 
+_SECRETS = [".ssh", ".gnupg", ".netrc", ".aws", ".kube", ".docker/config.json"]
+
+
 def build_config(mode, user, home, branchfs_bin, bwrap_bin, state_dir,
-                 storage_base, storage_store):
-    """Assemble the runtime config.json (bwrap confinement by default)."""
+                 storage_root="/storage", branch_store="/opt/branchfs_branches",
+                 container_name=""):
+    """Assemble the runtime config.json (bwrap confinement by default).
+
+    System mode models CCC's storage layout: the whole of ``/storage`` is the
+    single BranchFS underlay (read-through), branched ONCE into a node-local
+    delta store, and mounted back at ``/storage`` inside the sandbox.  CCC also
+    bind-mounts the user's home to the same bytes as
+    ``/storage/user/<container>`` -- so instead of branching that data a second
+    time, we point ``$HOME`` at that subdir of the single branch (``home_subdir``
+    on the root drives the in-sandbox ``$HOME`` bind; the top-level
+    ``home_subdir`` drives the policy alias ``/home/<user>`` ->
+    ``/storage/user/<container>``).  The store and state_dir therefore MUST live
+    outside ``/storage`` (else BranchFS would branch its own state and the agent
+    would see it)."""
     if mode == "system":
+        container = container_name or user
+        home_rel = "user/%s" % container                     # rel to /storage branch
+        home_abs = "%s/%s" % (storage_root.rstrip("/"), home_rel)
+        hide_paths = ["%s/%s" % (home_rel, s) for s in _SECRETS]
+        # If state_dir happens to sit under the underlay, hide it from the view.
+        sr = storage_root.rstrip("/")
+        if state_dir.rstrip("/").startswith(sr + "/"):
+            hide_paths.append(state_dir.rstrip("/")[len(sr) + 1:])
         root = {
-            "name": "storage_user", "base": storage_base, "store": storage_store,
-            "visible": "/storage/user", "home_subdir": "",
-            "hide_paths": [".ssh", ".gnupg", ".netrc", ".aws", ".kube",
-                           ".docker/config.json", ".ccc-agent"],
+            "name": "storage",
+            "base": storage_root,                            # /storage (read-through)
+            "store": os.path.join(branch_store, "storage"),  # node-local deltas
+            "visible": storage_root,                         # mounted back at /storage
+            "home_subdir": home_rel,                         # branch/<rel> -> /home/<user>
+            "hide_paths": hide_paths,
         }
-        ignore = ["/storage/user/.codex*", "/storage/user/.claude*",
-                  "/storage/user/.config*", "/storage/user/.cache*"]
+        top_home_subdir = container                          # alias /home/<user> -> /storage/user/<container>
+        workspace = "/home/%s" % user
+        ignore = ["%s/.codex*" % home_abs, "%s/.claude*" % home_abs,
+                  "%s/.config*" % home_abs, "%s/.cache*" % home_abs]
     else:  # user mode: protect the real home
         root = {
             "name": "home", "base": home, "store": os.path.join(state_dir,
                                                                 "stores", "home"),
             "visible": home, "home_subdir": "",
-            "hide_paths": [".ssh", ".gnupg", ".netrc", ".aws", ".kube",
-                           ".docker/config.json", ".ccc-agent"],
+            "hide_paths": _SECRETS + [".ccc-agent"],
         }
+        top_home_subdir = ""
+        workspace = home
         ignore = [os.path.join(home, ".codex*"), os.path.join(home, ".claude*"),
                   os.path.join(home, ".config*"), os.path.join(home, ".cache*")]
     return {
@@ -87,7 +116,8 @@ def build_config(mode, user, home, branchfs_bin, bwrap_bin, state_dir,
         "backend": "branchfs",
         "branchfs_bin": branchfs_bin,
         "user": user,
-        "home_subdir": "",
+        "home_subdir": top_home_subdir,
+        "workspace": workspace,
         "confinement": "bwrap",
         "bwrap_bin": bwrap_bin,
         "bwrap_proc_mode": "bind",
@@ -159,8 +189,14 @@ def main(argv=None):
     parser.add_argument("--branchfs-bin")
     parser.add_argument("--bwrap-bin")
     parser.add_argument("--state-dir")
-    parser.add_argument("--storage-base", default="/__real/storage_user")
-    parser.add_argument("--storage-store", default="/__branchfs_store/storage_user")
+    parser.add_argument("--storage-root", default="/storage",
+                        help="real BranchFS underlay (system mode); branched once")
+    parser.add_argument("--branch-store", default="/opt/branchfs_branches",
+                        help="node-local dir for BranchFS deltas (must be OUTSIDE "
+                             "--storage-root)")
+    parser.add_argument("--container-name",
+                        help="CCC container name; $HOME maps to "
+                             "<storage-root>/user/<container> (default: $CONTAINER_NAME)")
     parser.add_argument("--no-hooks", action="store_true",
                         help="skip registering agent hooks")
     parser.add_argument("--enable-shims", action="store_true",
@@ -178,9 +214,13 @@ def main(argv=None):
     _make_executable(os.path.join(shims, "ccc-agent-shim.sh"))
 
     user = args.user_name or os.environ.get("USER_NAME") or getpass.getuser()
+    container_name = args.container_name or os.environ.get("CONTAINER_NAME") or ""
     if mode == "system":
         home = "/home/%s" % user
-        state_dir = args.state_dir or "/storage/user/.ccc-agent"
+        # Node-local by default: the branch store lives off /storage, and so must
+        # the state_dir (mountpoints, session metadata) -- keeping it out of the
+        # branched underlay. Override with --state-dir for a persistent location.
+        state_dir = args.state_dir or "/opt/ccc-agent/state"
         config_file = args.config or "/etc/ccc-agent/config.json"
         claude_settings = os.environ.get(
             "CLAUDE_MANAGED_SETTINGS", "/etc/claude-code/managed-settings.json")
@@ -196,7 +236,8 @@ def main(argv=None):
     bwrap_bin = _resolve("bwrap", args.bwrap_bin)
 
     config = build_config(mode, user, home, branchfs_bin, bwrap_bin,
-                          state_dir, args.storage_base, args.storage_store)
+                          state_dir, args.storage_root, args.branch_store,
+                          container_name)
     _write_json(config_file, config)
     sys.stderr.write("ccc-agent-setup: wrote %s\n" % config_file)
 
