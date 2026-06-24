@@ -285,23 +285,69 @@ class TestBwrapConfinement(unittest.TestCase):
         runtime = self.h.base
         with mock.patch.object(subprocess, "run", side_effect=fake_run):
             run_session(self._bwrap_config(
-                ["true"], bwrap_ro_binds=[runtime, "/no/such/path"],
+                ["true"],
+                bwrap_ro_binds=[runtime, runtime + ":/ccc-agent", "/no/such/path"],
                 bwrap_setenv={"OPENAI_API_KEY": "sek-test"}))
         argv = seen["argv"]
-        # both runtime paths are re-exposed with --ro-bind-try; the missing one
-        # is tolerated by bwrap at mount time (skipped) rather than aborting the
-        # sandbox, so it still appears in argv.
+        # Existing runtime paths are re-exposed read-only; missing optional paths
+        # are skipped before invoking bwrap.
         self.assertIn(runtime, argv)
-        self.assertIn("/no/such/path", argv)
+        self.assertNotIn("/no/such/path", argv)
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        self.assertIn(("--ro-bind", runtime, "/ccc-agent"), triples)
         # the ro-bind for the runtime must come AFTER the view bind so it wins
         view_i = argv.index("/storage/user")
         ro_i = max(k for k in range(len(argv) - 1)
-                   if argv[k] == "--ro-bind-try" and argv[k + 1] == runtime)
+                   if argv[k] == "--ro-bind" and argv[k + 1] == runtime)
         self.assertGreater(ro_i, view_i)
         # setenv is passed through
         si = [k for k in range(len(argv) - 1)
               if argv[k] == "--setenv" and argv[k + 1] == "OPENAI_API_KEY"]
         self.assertTrue(si and argv[si[0] + 2] == "sek-test")
+
+    def test_bwrap_ro_bind_resolves_symlink_to_existing_target(self):
+        target = os.path.join(self._tmp.name, "real-storage", "domen", ".claude")
+        os.makedirs(target)
+        home = os.path.join(self._tmp.name, "home", "domen")
+        os.makedirs(home)
+        link = os.path.join(home, ".claude")
+        os.symlink(target, link)
+
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            run_session(self._bwrap_config(["true"], bwrap_ro_binds=[link]))
+
+        argv = seen["argv"]
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        self.assertIn(("--ro-bind", target, target), triples)
+        self.assertNotIn(link, argv)
+
+    def test_bwrap_ro_bind_skips_broken_symlink(self):
+        home = os.path.join(self._tmp.name, "home", "domen")
+        os.makedirs(home)
+        broken_target = os.path.join(self._tmp.name, "missing", ".claude")
+        link = os.path.join(home, ".claude")
+        os.symlink(broken_target, link)
+
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            run_session(self._bwrap_config(["true"], bwrap_ro_binds=[link]))
+
+        argv = seen["argv"]
+        self.assertNotIn(link, argv)
+        self.assertNotIn(broken_target, argv)
 
     def test_bwrap_binds_control_socket_and_sets_env(self):
         seen = {}
@@ -351,9 +397,9 @@ class TestBwrapConfinement(unittest.TestCase):
         argv = seen["argv"]
         triples = [(argv[k], argv[k + 1], argv[k + 2])
                    for k in range(len(argv) - 2)]
-        # cred dir re-exposed read-only (--ro-bind-try: a missing cred dir must
-        # not abort the sandbox)
-        self.assertIn(("--ro-bind-try", cred_dir, cred_dir), triples)
+        # cred dir re-exposed read-only; missing optional cred dirs are skipped
+        # before invoking bwrap.
+        self.assertIn(("--ro-bind", cred_dir, cred_dir), triples)
         # secret file masked with /dev/null
         self.assertIn(("--ro-bind", "/dev/null", auth), triples)
         # credential extracted from the host auth file and passed via env

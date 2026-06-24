@@ -158,6 +158,43 @@ BWRAP_RO_DIRS = ("/usr", "/etc", "/opt")
 BWRAP_USRMERGE_DIRS = ("/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32")
 
 
+def _optional_ro_bind(entry):
+    """Return a safe optional read-only bind triple, or None to skip it.
+
+    Entries are ``src`` or ``src:dest``.  Optional agent-runtime/config binds
+    often name paths under ``/home/<user>`` which CCC may implement as symlinks
+    into ``/storage/user``.  If bwrap is asked to mount on the symlink itself
+    *after* the BranchFS view is already bound over /home or /storage, the
+    destination symlink is resolved inside /newroot and can point at a path that
+    does not exist there.  Resolve symlinked optional binds on the trusted host
+    first and bind the real target path read-only instead.
+
+    Missing optional paths are skipped here instead of passed through as
+    ``--ro-bind-try``.  In particular, a broken symlink has no valid target and
+    should not be added to the sandbox command at all.
+    """
+    src, dest = entry.split(":", 1) if ":" in entry else (entry, entry)
+    explicit_dest = ":" in entry
+
+    resolved_src = os.path.realpath(src)
+    if not os.path.exists(resolved_src):
+        return None
+
+    if explicit_dest:
+        resolved_dest = os.path.realpath(dest)
+        # If the requested destination itself traverses a symlink, bind onto
+        # that target instead.  If the target is absent, the symlink is broken
+        # for our purposes and the optional bind should be skipped.
+        if os.path.normpath(resolved_dest) != os.path.normpath(dest):
+            if not os.path.exists(resolved_dest):
+                return None
+            dest = resolved_dest
+    else:
+        dest = resolved_src
+
+    return (resolved_src, dest)
+
+
 def _bwrap_command(session, config, control=None):
     """Build a bubblewrap command that confines the agent rootlessly.
 
@@ -222,21 +259,23 @@ def _bwrap_command(session, config, control=None):
     # INTO the FUSE view — creating spurious dir-deltas and churning inodes
     # (ESTALE) — so runtime that the agent doesn't need at a fixed in-view path
     # should bind to a dest outside the views (e.g. /opt/ccc-agent, /ccc-agent).
-    # Use --ro-bind-try (not --ro-bind) for these OPTIONAL re-exposes: the source
-    # may legitimately be missing (no ~/.claude when only codex is used), and the
-    # supervisor's os.path.exists() check can disagree with how bwrap resolves the
-    # source (the home bind + symlinks mean /home/<user>/.claude resolves to
-    # /storage/user/<container>/.claude inside bwrap). --ro-bind-try skips a
-    # missing source instead of aborting the whole sandbox.
+    # Optional symlinked same-path binds (e.g. ~/.claude -> /storage/user/...)
+    # are resolved on the host and bound at their real target path, because the
+    # destination symlink may point somewhere different or missing once /home and
+    # /storage have been overlaid with BranchFS views inside bwrap.
     for entry in config.bwrap_ro_binds:
-        src, dest = entry.split(":", 1) if ":" in entry else (entry, entry)
-        argv += ["--ro-bind-try", src, dest]
+        bind = _optional_ro_bind(entry)
+        if bind is not None:
+            src, dest = bind
+            argv += ["--ro-bind", src, dest]
 
     # Credentials: re-expose the agent's config/state dirs read-only from the
     # real home, then MASK the secret files (overmount /dev/null).  The real
     # credential is passed via env below — the auth file never enters the box.
     for src in config.cred_mounts:
-        argv += ["--ro-bind-try", src, src]
+        bind = _optional_ro_bind(src)
+        if bind is not None:
+            argv += ["--ro-bind", bind[0], bind[1]]
     for masked in config.cred_mask:
         if os.path.exists(masked):  # only mask a secret that's actually present
             argv += ["--ro-bind", "/dev/null", masked]
