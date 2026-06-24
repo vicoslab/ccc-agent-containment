@@ -6,7 +6,8 @@
 #   ln -s /opt/ccc-agent/shims/ccc-agent-shim.sh /usr/local/bin/codex
 #
 # Behavior:
-#   - resolves the real binary as the next match in PATH after this shim;
+#   - resolves the real binary as the next match in PATH after this shim,
+#     also checking ~/.local/bin for user-level agent installs;
 #   - nested agents (CCC_AGENT_SESSION set) run directly: the launcher reuses
 #     the existing session, so no new branch bundle is created;
 #   - CCC_AGENT_SHIM_BYPASS=1 skips containment entirely (debug only; policy
@@ -17,9 +18,19 @@ AGENT_NAME="$(basename "$0")"
 SHIM_PATH="$(command -v -- "$AGENT_NAME" || true)"
 
 # Find the real binary: first PATH entry whose $AGENT_NAME is not this shim.
+# Also check ~/.local/bin because Codex/Claude are commonly installed there,
+# and CCC startup/service environments may not include it in PATH.
 REAL_BIN=""
+SEARCH_PATH="$PATH"
+if [ -n "${HOME:-}" ]; then
+    USER_LOCAL_BIN="${HOME%/}/.local/bin"
+    case ":$SEARCH_PATH:" in
+        *":$USER_LOCAL_BIN:"*) ;;
+        *) SEARCH_PATH="$SEARCH_PATH:$USER_LOCAL_BIN" ;;
+    esac
+fi
 OLD_IFS="$IFS"; IFS=:
-for dir in $PATH; do
+for dir in $SEARCH_PATH; do
     candidate="$dir/$AGENT_NAME"
     [ -x "$candidate" ] || continue
     if [ "$candidate" != "$SHIM_PATH" ] && [ ! "$candidate" -ef "$SHIM_PATH" ]; then
@@ -30,7 +41,7 @@ done
 IFS="$OLD_IFS"
 
 if [ -z "$REAL_BIN" ]; then
-    echo "ccc-agent-shim: no real '$AGENT_NAME' binary found in PATH" >&2
+    echo "ccc-agent-shim: no real '$AGENT_NAME' binary found in PATH or ~/.local/bin" >&2
     exit 127
 fi
 

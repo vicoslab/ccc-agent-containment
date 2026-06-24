@@ -19,8 +19,8 @@
   "bwrap_ro_binds": ["/home/domen/.local:/opt/agent/.local"],
   "bwrap_setenv": {},
 
-  "_cred_comment": "Mount the agent's config/state dirs read-only from the real home so it finds them. OAuth-subscription logins authenticate from the token FILE, which must stay readable (do NOT mask it); cred_mask + cred_env are only for API-key auth (mask the file, pass the key by env).",
-  "cred_mounts": ["/home/domen/.codex", "/home/domen/.claude"],
+  "_cred_comment": "Do NOT bind the whole ~/.codex or ~/.claude read-only: Codex/Claude need writable config/state/cache/session dirs. They are visible through the writable BranchFS view, and policy ignore_patterns below discard their churn unless explicitly reviewed. Use cred_mounts only for narrow special-case read-only overlays; API-key deployments can use cred_mask + cred_env for individual secret files.",
+  "cred_mounts": [],
   "cred_mask": [],
   "cred_env": {},
 

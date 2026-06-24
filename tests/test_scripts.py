@@ -34,9 +34,13 @@ class TestShim(unittest.TestCase):
         tmp = self._tmp.name
         self.shimdir = os.path.join(tmp, "shims")
         self.realdir = os.path.join(tmp, "real")
+        self.home = os.path.join(tmp, "home")
+        self.localbin = os.path.join(self.home, ".local", "bin")
         os.makedirs(self.shimdir)
         os.makedirs(self.realdir)
+        os.makedirs(self.localbin)
         os.symlink(SHIM_SH, os.path.join(self.shimdir, "codex"))
+        os.symlink(SHIM_SH, os.path.join(self.shimdir, "claude"))
         self.real = os.path.join(self.realdir, "codex")
         with open(self.real, "w") as fh:
             fh.write("#!/bin/sh\necho REAL:$0:$*\n")
@@ -47,6 +51,7 @@ class TestShim(unittest.TestCase):
         os.chmod(self.launcher, 0o755)
         self.env = {
             "PATH": "%s:%s:/usr/bin:/bin" % (self.shimdir, self.realdir),
+            "HOME": self.home,
             "CCC_AGENT_LAUNCH": self.launcher,
         }
 
@@ -65,6 +70,21 @@ class TestShim(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("LAUNCH:--agent codex -- %s do thing" % self.real,
                       proc.stdout)
+
+    def test_finds_user_local_bin_when_not_on_path(self):
+        for agent in ("codex", "claude"):
+            local_real = os.path.join(self.localbin, agent)
+            with open(local_real, "w") as fh:
+                fh.write("#!/bin/sh\necho LOCAL:$0:$*\n")
+            os.chmod(local_real, 0o755)
+            env = dict(self.env)
+            env["PATH"] = "%s:/usr/bin:/bin" % self.shimdir
+            proc = subprocess.run([agent, "do", "thing"], env=env,
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("LAUNCH:--agent %s -- %s do thing" % (agent, local_real),
+                          proc.stdout)
 
     def test_nested_session_runs_real_binary_directly(self):
         proc = self.run_shim(env_extra={"CCC_AGENT_SESSION": "agent-x"})

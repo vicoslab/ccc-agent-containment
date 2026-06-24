@@ -124,12 +124,15 @@ def build_config(mode, user, home, branchfs_bin, bwrap_bin, state_dir,
         "_runtime_comment": "Re-expose the agent binary/runtime read-only at a "
                             "NON-view dest (e.g. '/path/to/agent:/opt/agent').",
         "bwrap_ro_binds": [],
-        "_cred_comment": "Agents read auth from these dirs (re-exposed "
-                         "read-only). OAuth logins authenticate from the token "
-                         "file, so do NOT mask it; cred_mask+cred_env are for "
-                         "API-key auth.",
-        "cred_mounts": [os.path.join(home, ".codex"),
-                        os.path.join(home, ".claude")],
+        "_cred_comment": "Agent config/state dirs such as ~/.codex and "
+                         "~/.claude stay writable in the BranchFS view so "
+                         "Codex/Claude can create logs, sessions, caches, "
+                         "and refreshed tokens. Their deltas are ignored by "
+                         "policy and discarded unless explicitly reviewed. "
+                         "Use cred_mounts only for narrow special-case "
+                         "read-only overlays; do not bind the whole agent "
+                         "state dirs read-only by default.",
+        "cred_mounts": [],
         "cred_mask": [],
         "cred_env": {},
         "roots": [root],
