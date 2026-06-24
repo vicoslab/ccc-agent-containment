@@ -99,6 +99,9 @@ def main_run(argv=None, env=None):
                              "(repeatable)")
     parser.add_argument("--agent", default="command",
                         help="agent kind label, e.g. codex, claude, hermes")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="print the full session event log (always shows "
+                             "the error detail on failure)")
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="-- command to run")
     args = parser.parse_args(argv)
@@ -152,6 +155,32 @@ def main_run(argv=None, env=None):
 
     sys.stderr.write("ccc-agent: session %s finished: %s\n"
                      % (session.session_id, session.state))
+
+    # Surface WHY it failed: the failure paths in run_session record the reason
+    # as an "error" event (mount/launch/finalize/commit detail, incl. branchfs
+    # stderr). Always print those on failure; --verbose dumps the full timeline.
+    errors = [e for e in session.events if e.get("event") == "error"]
+    if session.state == "failed":
+        if errors:
+            for e in errors:
+                sys.stderr.write("ccc-agent: error: %s\n"
+                                 % e.get("detail", "(no detail recorded)"))
+        else:
+            sys.stderr.write("ccc-agent: failed but no error detail was "
+                             "recorded; see the event log (-v) below\n")
+    if args.verbose:
+        sys.stderr.write("ccc-agent: event log:\n")
+        for e in session.events:
+            line = "  %s  %s" % (e.get("time", ""), e.get("event", ""))
+            if e.get("detail") is not None:
+                line += ": %s" % e["detail"]
+            sys.stderr.write(line + "\n")
+    if session.state == "failed":
+        sys.stderr.write(
+            "ccc-agent: full record: %s\n"
+            "ccc-agent: inspect with: ccc-agentctl show %s\n"
+            % (store.session_file(session.session_id), session.session_id))
+
     if session.state == "pending-review":
         sys.stderr.write(
             "ccc-agent: review with: ccc-agentctl diff %s\n"
