@@ -282,22 +282,21 @@ class TestBwrapConfinement(unittest.TestCase):
             seen["argv"] = list(argv)
             return subprocess.CompletedProcess(argv, 0)
 
-        # Use the harness base dir (exists) as a re-exposed runtime path so the
-        # os.path.exists() guard passes.
         runtime = self.h.base
         with mock.patch.object(subprocess, "run", side_effect=fake_run):
             run_session(self._bwrap_config(
                 ["true"], bwrap_ro_binds=[runtime, "/no/such/path"],
                 bwrap_setenv={"OPENAI_API_KEY": "sek-test"}))
         argv = seen["argv"]
-        # the existing runtime path is re-exposed read-only; the missing one is
-        # silently skipped
+        # both runtime paths are re-exposed with --ro-bind-try; the missing one
+        # is tolerated by bwrap at mount time (skipped) rather than aborting the
+        # sandbox, so it still appears in argv.
         self.assertIn(runtime, argv)
-        self.assertNotIn("/no/such/path", argv)
+        self.assertIn("/no/such/path", argv)
         # the ro-bind for the runtime must come AFTER the view bind so it wins
         view_i = argv.index("/storage/user")
         ro_i = max(k for k in range(len(argv) - 1)
-                   if argv[k] == "--ro-bind" and argv[k + 1] == runtime)
+                   if argv[k] == "--ro-bind-try" and argv[k + 1] == runtime)
         self.assertGreater(ro_i, view_i)
         # setenv is passed through
         si = [k for k in range(len(argv) - 1)
@@ -352,8 +351,9 @@ class TestBwrapConfinement(unittest.TestCase):
         argv = seen["argv"]
         triples = [(argv[k], argv[k + 1], argv[k + 2])
                    for k in range(len(argv) - 2)]
-        # cred dir re-exposed read-only
-        self.assertIn(("--ro-bind", cred_dir, cred_dir), triples)
+        # cred dir re-exposed read-only (--ro-bind-try: a missing cred dir must
+        # not abort the sandbox)
+        self.assertIn(("--ro-bind-try", cred_dir, cred_dir), triples)
         # secret file masked with /dev/null
         self.assertIn(("--ro-bind", "/dev/null", auth), triples)
         # credential extracted from the host auth file and passed via env

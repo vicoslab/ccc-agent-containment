@@ -1,6 +1,7 @@
 {
   "_comment": "ccc-agent runtime config. Install (root-owned, world-readable) at /etc/ccc-agent/config.json or /opt/ccc-agent/config/config.json. The agent must never be able to write this file or anything under state_dir. In CCC images this file is generated at container startup by ccc-agent-setup (it needs runtime-only paths: the container name + /storage layout), NOT at image build.",
-  "state_dir": "/opt/ccc-agent/state",
+  "_state_comment": "Holds the BranchFS mountpoints, so it MUST be under a CCC bind mount (the FUSE sidecar refuses the container overlay like /opt). /storage/user always is; it is hidden from the branch via hide_paths. For node-local speed use a bind-mounted local scratch, e.g. /storage/local/ssd/.ccc-agent.",
+  "state_dir": "/storage/user/.ccc-agent",
   "backend": "branchfs",
   "branchfs_bin": "/usr/local/bin/branchfs",
   "user": "domen",

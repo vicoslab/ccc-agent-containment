@@ -217,10 +217,16 @@ def main(argv=None):
     container_name = args.container_name or os.environ.get("CONTAINER_NAME") or ""
     if mode == "system":
         home = "/home/%s" % user
-        # Node-local by default: the branch store lives off /storage, and so must
-        # the state_dir (mountpoints, session metadata) -- keeping it out of the
-        # branched underlay. Override with --state-dir for a persistent location.
-        state_dir = args.state_dir or "/opt/ccc-agent/state"
+        # The state_dir holds the BranchFS *mountpoints*, so it MUST sit where the
+        # CCC FUSE sidecar can mount -- i.e. under a Docker bind mount. The sidecar
+        # translates client->host paths and refuses the container's overlay, so a
+        # path like /opt/... fails the mount with EPERM (even as root: there is no
+        # host-side bind mount to mount into). /storage/user is always such a bind
+        # mount; it is inside the /storage underlay but build_config hides it from
+        # the branch so BranchFS never recurses into it. For node-local speed,
+        # point --state-dir at a bind-mounted local scratch, e.g.
+        # /storage/local/ssd/.ccc-agent.
+        state_dir = args.state_dir or "/storage/user/.ccc-agent"
         config_file = args.config or "/etc/ccc-agent/config.json"
         claude_settings = os.environ.get(
             "CLAUDE_MANAGED_SETTINGS", "/etc/claude-code/managed-settings.json")

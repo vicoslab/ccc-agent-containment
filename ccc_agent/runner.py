@@ -222,19 +222,23 @@ def _bwrap_command(session, config, control=None):
     # INTO the FUSE view — creating spurious dir-deltas and churning inodes
     # (ESTALE) — so runtime that the agent doesn't need at a fixed in-view path
     # should bind to a dest outside the views (e.g. /opt/ccc-agent, /ccc-agent).
+    # Use --ro-bind-try (not --ro-bind) for these OPTIONAL re-exposes: the source
+    # may legitimately be missing (no ~/.claude when only codex is used), and the
+    # supervisor's os.path.exists() check can disagree with how bwrap resolves the
+    # source (the home bind + symlinks mean /home/<user>/.claude resolves to
+    # /storage/user/<container>/.claude inside bwrap). --ro-bind-try skips a
+    # missing source instead of aborting the whole sandbox.
     for entry in config.bwrap_ro_binds:
         src, dest = entry.split(":", 1) if ":" in entry else (entry, entry)
-        if os.path.exists(src):
-            argv += ["--ro-bind", src, dest]
+        argv += ["--ro-bind-try", src, dest]
 
     # Credentials: re-expose the agent's config/state dirs read-only from the
     # real home, then MASK the secret files (overmount /dev/null).  The real
     # credential is passed via env below — the auth file never enters the box.
     for src in config.cred_mounts:
-        if os.path.exists(src):
-            argv += ["--ro-bind", src, src]
+        argv += ["--ro-bind-try", src, src]
     for masked in config.cred_mask:
-        if os.path.exists(masked):
+        if os.path.exists(masked):  # only mask a secret that's actually present
             argv += ["--ro-bind", "/dev/null", masked]
 
     # Per-turn control socket: bind the host socket to a fixed in-sandbox path
