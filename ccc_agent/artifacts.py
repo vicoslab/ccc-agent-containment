@@ -92,11 +92,11 @@ def render_summary(session, changes_by_root, decision):
     out("## Next steps")
     out("")
     out("```bash")
-    out("ccc-agentctl show %s" % session.session_id)
-    out("ccc-agentctl diff %s" % session.session_id)
-    out("ccc-agentctl commit %s   # apply branch to real storage" %
+    out("ccc-agent show %s" % session.session_id)
+    out("ccc-agent diff %s" % session.session_id)
+    out("ccc-agent commit %s   # apply branch to real storage" %
         session.session_id)
-    out("ccc-agentctl abort %s    # discard branch" % session.session_id)
+    out("ccc-agent abort %s    # discard branch" % session.session_id)
     out("```")
     out("")
     return "\n".join(lines)

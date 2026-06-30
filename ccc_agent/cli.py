@@ -1,4 +1,4 @@
-"""Command-line entrypoints: ccc-agent-run / ccc-agent-launch / ccc-agentctl.
+"""Unified command-line entrypoint: ``ccc-agent OP ...``.
 
 Runtime configuration comes from a JSON file (stdlib-only trusted layer):
 
@@ -25,7 +25,9 @@ import argparse
 import getpass
 import json
 import os
+import subprocess
 import sys
+from importlib import resources
 
 from .branchfs import BranchfsCli, FakeBranchFS
 from .control import (ControlClient, VERDICT_COMMITTED, VERDICT_HELD,
@@ -83,9 +85,9 @@ def build_runtime(config):
     return store, backend, alias_map, user, roots
 
 
-def main_run(argv=None, env=None):
+def main_run(argv=None, env=None, prog="ccc-agent run"):
     parser = argparse.ArgumentParser(
-        prog="ccc-agent-run",
+        prog=prog,
         description="Run a command inside a contained BranchFS agent session.")
     parser.add_argument("--config", help="path to config.json")
     parser.add_argument("--workspace",
@@ -110,7 +112,7 @@ def main_run(argv=None, env=None):
     if command and command[0] == "--":
         command = command[1:]
     if not command:
-        parser.error("no agent command given (use: ccc-agent-run ... -- cmd)")
+        parser.error("no agent command given (use: %s ... -- cmd)" % prog)
 
     config = load_config(args.config, env=env)
     store, backend, alias_map, user, roots = build_runtime(config)
@@ -150,7 +152,9 @@ def main_run(argv=None, env=None):
         cred_mask=config.get("cred_mask", ()),
         cred_env=config.get("cred_env"),
         bwrap_uid=config.get("bwrap_uid"),
-        bwrap_gid=config.get("bwrap_gid"))
+        bwrap_gid=config.get("bwrap_gid"),
+        agent_plugins=({} if config.get("agent_hook_mode") == "disabled"
+                       else config.get("agent_plugins")))
     session = run_session(runner_config, env=env)
 
     sys.stderr.write("ccc-agent: session %s finished: %s\n"
@@ -178,13 +182,13 @@ def main_run(argv=None, env=None):
     if session.state == "failed":
         sys.stderr.write(
             "ccc-agent: full record: %s\n"
-            "ccc-agent: inspect with: ccc-agentctl show %s\n"
+            "ccc-agent: inspect with: ccc-agent show %s\n"
             % (store.session_file(session.session_id), session.session_id))
 
     if session.state == "pending-review":
         sys.stderr.write(
-            "ccc-agent: review with: ccc-agentctl diff %s\n"
-            "ccc-agent: then: ccc-agentctl commit %s | ccc-agentctl abort %s\n"
+            "ccc-agent: review with: ccc-agent diff %s\n"
+            "ccc-agent: then: ccc-agent commit %s | ccc-agent abort %s\n"
             % (session.session_id, session.session_id, session.session_id))
     if session.state == "failed":
         return 1
@@ -204,7 +208,7 @@ def _ctl_socket(args, env):
     token = env.get(ENV_CONTROL_TOKEN)
     if not sock or not token:
         sys.stderr.write(
-            "ccc-agentctl: no control socket; per-turn control unavailable "
+            "ccc-agent: no control socket; per-turn control unavailable "
             "(not inside a contained session)\n")
         return 0
     client = ControlClient(sock, token)
@@ -217,7 +221,7 @@ def _ctl_socket(args, env):
             resp = client.approve_turn(args.approval_token, args.decision,
                                        paths=paths)
     except ChannelError as exc:
-        sys.stderr.write("ccc-agentctl: control error: %s\n" % exc)
+        sys.stderr.write("ccc-agent: control error: %s\n" % exc)
         return 0
     verdict = resp.get("verdict")
     if verdict == VERDICT_NEEDS_APPROVAL:
@@ -230,10 +234,10 @@ def _ctl_socket(args, env):
             sys.stderr.write("  - %s\n" % path)
         sys.stderr.write(
             "ccc-agent: ask the user how to handle these, then run ONE of:\n"
-            "    ccc-agentctl approve-turn %s            # commit all\n"
-            "    ccc-agentctl approve-turn %s keep       # keep, don't commit\n"
-            "    ccc-agentctl approve-turn %s revert     # discard (you undo)\n"
-            "    ccc-agentctl approve-turn %s --paths a,b # commit only a,b\n"
+            "    ccc-agent approve-turn %s            # commit all\n"
+            "    ccc-agent approve-turn %s keep       # keep, don't commit\n"
+            "    ccc-agent approve-turn %s revert     # discard (you undo)\n"
+            "    ccc-agent approve-turn %s --paths a,b # commit only a,b\n"
             % (token2, token2, token2, token2))
         return 2
     if verdict == VERDICT_COMMITTED:
@@ -253,9 +257,18 @@ def _ctl_socket(args, env):
     return 0
 
 
-def main_ctl(argv=None, env=None):
+def main_ctl(argv=None, env=None, prog="ccc-agent"):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Accept both ``ccc-agent --config X list`` (argparse's natural shape) and
+    # ``ccc-agent list --config X`` (the shape people tend to type for verbs).
+    if "--config" in argv:
+        idx = argv.index("--config")
+        if idx > 0 and idx + 1 < len(argv):
+            pair = argv[idx:idx + 2]
+            del argv[idx:idx + 2]
+            argv = pair + argv
     parser = argparse.ArgumentParser(
-        prog="ccc-agentctl",
+        prog=prog,
         description="Inspect and control BranchFS agent sessions.")
     parser.add_argument("--config", help="path to config.json")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -335,6 +348,74 @@ def main_ctl(argv=None, env=None):
             if controller.check_before_final(args.session_id) == CHECK_REPAIR:
                 return 2
     except ControlError as exc:
-        sys.stderr.write("ccc-agentctl: %s\n" % exc)
+        sys.stderr.write("ccc-agent: %s\n" % exc)
         return 1
     return 0
+
+
+def main_softsandbox(argv=None, env=None):
+    """Run the legacy soft sandbox as ``ccc-agent softsandbox``.
+
+    The soft sandbox is still a Bash implementation because it is a diagnostic /
+    PoC helper rather than the production BranchFS+bwrap path. Keeping it as a
+    package asset lets the public command surface stay unified without a second
+    installed executable.
+    """
+    argv = [] if argv is None else list(argv)
+    env = os.environ if env is None else env
+    script_ref = resources.files("ccc_agent").joinpath(
+        "assets", "scripts", "softsandbox.sh")
+    with resources.as_file(script_ref) as script:
+        return subprocess.call(["bash", str(script)] + argv, env=env)
+
+
+_CTL_OPS = {
+    "list", "show", "status", "diff", "commit", "abort", "thaw", "finish",
+    "finish-turn", "check-before-final", "review", "finalize-turn",
+    "approve-turn",
+}
+
+
+def _print_main_help(stream=None):
+    stream = sys.stdout if stream is None else stream
+    stream.write(
+        "usage: ccc-agent OP [options]\n\n"
+        "Unified CCC agent containment CLI.\n\n"
+        "Primary ops:\n"
+        "  run              run a command in a contained BranchFS session\n"
+        "  setup            write config, plugin entries, and optional shims\n"
+        "  softsandbox      diagnostic non-FUSE soft sandbox helper\n\n"
+        "Session/control ops:\n"
+        "  list, show, status, diff, review, commit, abort, thaw, finish\n"
+        "  finish-turn, check-before-final, finalize-turn, approve-turn\n\n"
+        "Examples:\n"
+        "  ccc-agent run --workspace /home/$USER/project -- codex exec 'fix bug'\n"
+        "  ccc-agent list\n"
+        "  ccc-agent review <session> --accept\n"
+        "  ccc-agent setup --system --enable-shims\n")
+
+
+def main(argv=None, env=None):
+    """Dispatch the unified ``ccc-agent OP`` command surface."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        _print_main_help()
+        return 0
+
+    op, rest = argv[0], argv[1:]
+    if op in ("run", "launch"):
+        return main_run(rest, env=env, prog="ccc-agent %s" % op)
+    if op == "setup":
+        from . import setup as setup_mod
+        return setup_mod.main(rest, prog="ccc-agent setup")
+    if op == "softsandbox":
+        return main_softsandbox(rest, env=env)
+
+    # Control operations are direct: ``ccc-agent list``, ``ccc-agent diff ID``.
+    # Also pass through leading global flags, e.g. ``ccc-agent --config X list``.
+    if op in _CTL_OPS or op.startswith("-"):
+        return main_ctl(argv, env=env, prog="ccc-agent")
+
+    sys.stderr.write("ccc-agent: unknown op %r\n\n" % op)
+    _print_main_help(stream=sys.stderr)
+    return 2

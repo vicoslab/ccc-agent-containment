@@ -1,4 +1,4 @@
-"""Operator/hook control surface over branch sessions (ccc-agentctl).
+"""Operator/hook control surface over branch sessions (ccc-agent).
 
 Hooks are *reporters*: ``finish-turn`` only records lifecycle events, and
 ``check-before-final`` only reads live status to drive bounded self-repair.

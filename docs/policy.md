@@ -43,7 +43,7 @@ Default deny set (see `policy.DEFAULT_DENY_PATTERNS`): SSH/GPG material,
 `.env*`, key/credential files, `.netrc`, `.aws`, `.kube/config`,
 `.docker/config.json`, `.git/config`, `.git/hooks`, shell startup files,
 `.condarc`, and `.ccc-agent` (supervisor state). Override per deployment via
-`deny_patterns` in policy config; extend per run with `ccc-agent-run --hide`.
+`deny_patterns` in policy config; extend per run with `ccc-agent run --hide`.
 
 ## Secret hiding: what is and is not guaranteed
 
@@ -80,10 +80,10 @@ touched).
 | `training-run` | scopes = declared artifact dirs (checkpoints, logs) |
 | `throwaway` | exploration; discard at completion unless a human commits first |
 
-## Bounded self-repair (`ccc-agentctl check-before-final`)
+## Bounded self-repair (`ccc-agent check-before-final`)
 
 When a harness supports a blocking Stop hook (Claude Code, Codex), the hook
-runs `ccc-agentctl check-before-final <session>` before reporting the turn.
+runs `ccc-agent check-before-final <session>` before reporting the turn.
 The check classifies **live** status — no freeze, no commit — and only looks
 at scope and deny/hide hygiene; mode semantics (`manual`,
 `read-only-review`, ...) still apply at finalize:

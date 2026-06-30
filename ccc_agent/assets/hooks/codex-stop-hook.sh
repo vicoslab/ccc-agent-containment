@@ -8,7 +8,7 @@
 # commit from a hook.
 set -eu
 
-CTL="${CCC_AGENTCTL:-ccc-agentctl}"
+CTL="${CCC_AGENT_CLI:-ccc-agent}"
 
 [ -n "${CCC_AGENT_SESSION:-}" ] || exit 0
 command -v "$CTL" >/dev/null 2>&1 || exit 0

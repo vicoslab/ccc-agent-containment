@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ccc-agent-softsandbox — BranchFS tracking sandbox for agent containment.
+# ccc-agent softsandbox — BranchFS tracking sandbox for agent containment.
 #
 # Provides a "tracking sandbox" without FUSE or root access:
 #
@@ -20,7 +20,7 @@
 # Full containment requires FUSE + chroot (see scripts/ccc-agent-chroot.sh).
 #
 # Usage:
-#   ccc-agent-softsandbox [options] -- COMMAND [ARGS...]
+#   ccc-agent softsandbox [options] -- COMMAND [ARGS...]
 #
 # Options:
 #   --workspace DIR    The folder to protect (default: $PWD)
@@ -34,13 +34,13 @@
 #
 # Environment:
 #   CCC_AGENT_SESSION         If set, assumes nested agent; runs uncontained
-#   CCC_AGENT_SOFTSANDBOX_BIN Path to branchfs binary override
+#   CCC_AGENT_BRANCHFS_BIN Path to branchfs binary override
 set -euo pipefail
 
 WORKSPACE="$(realpath "${PWD}")"
 SESSION_ID=""
 STATE_DIR="${HOME}/.ccc-agent"
-BRANCHFS_BIN="${CCC_AGENT_SOFTSANDBOX_BIN:-}"
+BRANCHFS_BIN="${CCC_AGENT_BRANCHFS_BIN:-}"
 declare -a HIDE_PATHS=()
 ISOLATE=0
 NO_CONFIRM=0
@@ -66,7 +66,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ ${#COMMAND[@]} -gt 0 ]] || {
-    echo "softsandbox: no command given. Usage: ccc-agent-softsandbox [opts] -- CMD" >&2
+    echo "softsandbox: no command given. Usage: ccc-agent softsandbox [opts] -- CMD" >&2
     exit 2
 }
 
@@ -82,9 +82,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -z "$BRANCHFS_BIN" ]]; then
     for c in \
-        "${SCRIPT_DIR}/../../worktrees/branchfs-agent-containment/target/debug/branchfs" \
-        "${SCRIPT_DIR}/../../worktrees/branchfs-agent-containment/target/release/branchfs" \
-        "${SCRIPT_DIR}/../branchfs/target/debug/branchfs" \
+        "${SCRIPT_DIR}/../../../../worktrees/branchfs-agent-containment/target/debug/branchfs" \
+        "${SCRIPT_DIR}/../../../../worktrees/branchfs-agent-containment/target/release/branchfs" \
+        "${SCRIPT_DIR}/../../../../branchfs/target/debug/branchfs" \
         "/opt/ccc-agent/bin/branchfs" \
         "$(command -v branchfs 2>/dev/null || true)"
     do
@@ -92,7 +92,7 @@ if [[ -z "$BRANCHFS_BIN" ]]; then
     done
 fi
 [[ -x "${BRANCHFS_BIN:-}" ]] || {
-    echo "softsandbox: no branchfs binary. Set --branchfs or CCC_AGENT_SOFTSANDBOX_BIN." >&2
+    echo "softsandbox: no branchfs binary. Set --branchfs or CCC_AGENT_BRANCHFS_BIN." >&2
     exit 1
 }
 CONDA_LIB="${CONDA_LIB:-/home/domen/conda/envs/branchfs-dev/lib}"
@@ -117,7 +117,7 @@ SESSIONS_DIR="${STATE_DIR}/sessions"
 # Dry run
 # ---------------------------------------------------------------------------
 if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "ccc-agent-softsandbox DRY RUN"
+    echo "ccc-agent softsandbox DRY RUN"
     echo "  Session:    $SESSION_ID"
     echo "  Workspace:  $WORKSPACE"
     echo "  Mode:       $([ $ISOLATE -eq 1 ] && echo isolate || echo tracking)"

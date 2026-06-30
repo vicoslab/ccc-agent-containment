@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end test of ccc-agent-run in 'none' confinement mode.
+# End-to-end test of ccc-agent run in 'none' confinement mode.
 # Run from domen-cuda10 as uid 2094 (domen).
 
-AGENT_DIR=/storage/user/agent-workspace/conda-compute-cluster/ccc-agent-containment
+AGENT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)
 BRANCHFS=/storage/user/agent-workspace/conda-compute-cluster/worktrees/branchfs-agent-containment/target/debug/branchfs
 LD_LIB=/home/domen/conda/envs/branchfs-dev/lib
 TEST_BASE=/home/domen/ccc-e2e-test
@@ -52,7 +52,7 @@ EOF
 run_agent() {
     CCC_AGENT_BRANCHFS_BIN=$BRANCHFS \
     LD_LIBRARY_PATH=$LD_LIB \
-    "$AGENT_DIR/bin/ccc-agent-run" \
+    "$AGENT_DIR/bin/ccc-agent" run \
         --config "$CONFIG_FILE" \
         --agent fake-agent \
         -- "$@" 2>&1
@@ -88,13 +88,13 @@ echo "=== Test 3: no-op run aborts cleanly ==="
 run_agent true
 check "noop session aborted" \
     '[ "$(LD_LIBRARY_PATH=$LD_LIB CCC_AGENT_BRANCHFS_BIN=$BRANCHFS \
-          "$AGENT_DIR/bin/ccc-agentctl" --config "$CONFIG_FILE" list 2>/dev/null \
+          "$AGENT_DIR/bin/ccc-agent" --config "$CONFIG_FILE" list 2>/dev/null \
           | grep aborted | wc -l)" -ge 1 ]'
 
 echo ""
 echo "=== Session list ==="
 LD_LIBRARY_PATH=$LD_LIB CCC_AGENT_BRANCHFS_BIN=$BRANCHFS \
-"$AGENT_DIR/bin/ccc-agentctl" --config "$CONFIG_FILE" list 2>&1 || true
+"$AGENT_DIR/bin/ccc-agent" --config "$CONFIG_FILE" list 2>&1 || true
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

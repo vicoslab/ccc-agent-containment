@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Real-agent e2e: run a minimal codex (and optionally claude) turn through
-# ccc-agent-run inside bwrap, and verify the file it creates lands in the base.
+# ccc-agent run inside bwrap, and verify the file it creates lands in the base.
 # Guarded: no-ops if creds/binaries are absent. Uses ONE tiny LLM turn.
 #
 # This exercises the `exec`/`-p` (process-exit) path: one turn per process, so
 # the supervisor's end-of-process finalize is the per-turn commit. (The
 # interactive Stop-hook/notify path is covered by test-e2e-perturn.sh + units.)
-REPO=/storage/user/agent-workspace/conda-compute-cluster/ccc-agent-containment
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)
 BRANCHFS=/storage/user/agent-workspace/conda-compute-cluster/worktrees/branchfs-agent-containment/target/debug/branchfs
 LD_LIB=/home/domen/conda/envs/branchfs-dev/lib
 BWRAP=/home/domen/conda/envs/codex/bin/bwrap
@@ -46,7 +46,7 @@ EOF
 
 echo "=== real codex exec turn (in bwrap) ==="
 CCC_AGENT_BRANCHFS_BIN=$BRANCHFS LD_LIBRARY_PATH=$LD_LIB \
-timeout 120 "$REPO/bin/ccc-agent-run" --config "$CFG" --agent codex \
+timeout 120 "$REPO/bin/ccc-agent" run --config "$CFG" --agent codex \
   -- "$CODEX_ENV/bin/codex" exec --dangerously-bypass-approvals-and-sandbox \
      --skip-git-repo-check "Create a file named hello.txt containing exactly: hi" \
   2>&1 | tail -25

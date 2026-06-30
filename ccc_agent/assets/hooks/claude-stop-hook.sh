@@ -19,15 +19,15 @@
 # self-repair; they never freeze, commit, or abort.
 set -eu
 
-CTL="${CCC_AGENTCTL:-ccc-agentctl}"
+CTL="${CCC_AGENT_CLI:-ccc-agent}"
 
 if [ -z "${CCC_AGENT_SESSION:-}" ]; then
-    # not a contained session (e.g. human-run claude outside ccc-agent-run)
+    # not a contained session (e.g. human-run claude outside ccc-agent run)
     exit 0
 fi
 
 if ! command -v "$CTL" >/dev/null 2>&1; then
-    echo "ccc claude hook: ccc-agentctl not found at $CTL" >&2
+    echo "ccc claude hook: ccc-agent not found at $CTL" >&2
     exit 0   # never block the agent's stop on hook plumbing problems
 fi
 
@@ -36,7 +36,7 @@ fi
 # socket.  It commits the turn's in-scope changes and exits 0 (the stop
 # proceeds); on out-of-scope changes it exits 2 with the offending paths and an
 # approval token on stderr, which Claude Code feeds back to the agent so it can
-# ask the user and then run `ccc-agentctl approve-turn <token>`.
+# ask the user and then run `ccc-agent approve-turn <token>`.
 if [ -n "${CCC_AGENT_CONTROL_SOCK:-}" ]; then
     rc=0
     "$CTL" finalize-turn || rc=$?

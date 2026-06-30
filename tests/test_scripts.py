@@ -1,6 +1,7 @@
 """Tests for the shell scaffolding: launch shim and hook adapters. All run
 unprivileged (syntax and behavior checks only)."""
 
+import json
 import os
 import stat
 import subprocess
@@ -10,22 +11,71 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT_DIR = os.path.dirname(HERE)
 ASSETS = os.path.join(AGENT_DIR, "ccc_agent", "assets")
+PLUGINS = os.path.join(ASSETS, "plugins")
 SHIM_SH = os.path.join(ASSETS, "shims", "ccc-agent-shim.sh")
+SOFTSANDBOX_SH = os.path.join(ASSETS, "scripts", "softsandbox.sh")
 HOOKS = [os.path.join(ASSETS, "hooks", name)
          for name in ("claude-stop-hook.sh", "codex-stop-hook.sh",
                       "hermes-finish-turn.sh")]
 # hooks with blocking stop semantics (check-before-final self-repair)
 STOP_HOOKS = [os.path.join(ASSETS, "hooks", name)
               for name in ("claude-stop-hook.sh", "codex-stop-hook.sh")]
+# plugin-bundled stop hooks (the auto-injected per-contained-run path)
+PLUGIN_STOP_HOOKS = [
+    os.path.join(PLUGINS, "claude-ccc-containment", "hooks", "ccc-stop-hook.sh"),
+    os.path.join(PLUGINS, "codex-ccc-containment", "hooks", "ccc-stop-hook.sh"),
+]
 
 
 class TestShellSyntax(unittest.TestCase):
     def test_all_scripts_parse(self):
-        for script in [SHIM_SH] + HOOKS:
+        for script in [SHIM_SH, SOFTSANDBOX_SH] + HOOKS + PLUGIN_STOP_HOOKS:
             proc = subprocess.run(["bash", "-n", script],
                                   stderr=subprocess.PIPE, text=True)
             self.assertEqual(proc.returncode, 0,
                              "%s: %s" % (script, proc.stderr))
+
+
+class TestPluginAssets(unittest.TestCase):
+    """The packaged native plugins ccc-agent run injects per contained run."""
+
+    def test_claude_plugin_layout(self):
+        root = os.path.join(PLUGINS, "claude-ccc-containment")
+        self.assertTrue(os.path.isfile(
+            os.path.join(root, ".claude-plugin", "plugin.json")))
+        with open(os.path.join(root, "hooks", "hooks.json")) as fh:
+            hooks = json.load(fh)
+        self.assertIn("Stop", hooks["hooks"])
+        cmd = hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
+        self.assertIn("ccc-stop-hook.sh", cmd)
+        self.assertTrue(os.path.isfile(
+            os.path.join(root, "hooks", "ccc-stop-hook.sh")))
+
+    def test_codex_plugin_layout(self):
+        root = os.path.join(PLUGINS, "codex-ccc-containment")
+        self.assertTrue(os.path.isfile(
+            os.path.join(root, ".codex-plugin", "plugin.json")))
+        with open(os.path.join(root, "hooks", "hooks.json")) as fh:
+            hooks = json.load(fh)
+        self.assertIn("Stop", hooks["hooks"])
+        self.assertTrue(os.path.isfile(
+            os.path.join(root, "hooks", "ccc-stop-hook.sh")))
+
+    def test_hermes_plugin_layout(self):
+        root = os.path.join(PLUGINS, "hermes-ccc-containment")
+        self.assertTrue(os.path.isfile(os.path.join(root, "plugin.yaml")))
+        with open(os.path.join(root, "__init__.py")) as fh:
+            src = fh.read()
+        self.assertIn("def register", src)
+        self.assertIn("finalize-turn", src)
+
+    def test_bundled_stop_hooks_match(self):
+        # the claude/codex plugin stop hooks are the same adapter; guard drift
+        bodies = set()
+        for path in PLUGIN_STOP_HOOKS:
+            with open(path) as fh:
+                bodies.add(fh.read())
+        self.assertEqual(len(bodies), 1, "plugin stop hooks have drifted")
 
 
 class TestShim(unittest.TestCase):
@@ -45,14 +95,14 @@ class TestShim(unittest.TestCase):
         with open(self.real, "w") as fh:
             fh.write("#!/bin/sh\necho REAL:$0:$*\n")
         os.chmod(self.real, 0o755)
-        self.launcher = os.path.join(tmp, "ccc-agent-launch")
+        self.launcher = os.path.join(tmp, "ccc-agent")
         with open(self.launcher, "w") as fh:
             fh.write("#!/bin/sh\necho LAUNCH:$*\n")
         os.chmod(self.launcher, 0o755)
         self.env = {
             "PATH": "%s:%s:/usr/bin:/bin" % (self.shimdir, self.realdir),
             "HOME": self.home,
-            "CCC_AGENT_LAUNCH": self.launcher,
+            "CCC_AGENT_CLI": self.launcher,
         }
 
     def tearDown(self):
@@ -68,7 +118,7 @@ class TestShim(unittest.TestCase):
     def test_shim_wraps_with_launcher(self):
         proc = self.run_shim()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("LAUNCH:--agent codex -- %s do thing" % self.real,
+        self.assertIn("LAUNCH:run --agent codex -- %s do thing" % self.real,
                       proc.stdout)
 
     def test_finds_user_local_bin_when_not_on_path(self):
@@ -83,7 +133,7 @@ class TestShim(unittest.TestCase):
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertIn("LAUNCH:--agent %s -- %s do thing" % (agent, local_real),
+            self.assertIn("LAUNCH:run --agent %s -- %s do thing" % (agent, local_real),
                           proc.stdout)
 
     def test_nested_session_runs_real_binary_directly(self):
@@ -98,7 +148,7 @@ class TestShim(unittest.TestCase):
 
     def test_missing_launcher_refuses_unprotected_run(self):
         env = dict(self.env)
-        env["CCC_AGENT_LAUNCH"] = "/nonexistent/launcher"
+        env["CCC_AGENT_CLI"] = "/nonexistent/launcher"
         proc = subprocess.run(["codex", "x"], env=env,
                               stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)
@@ -113,7 +163,7 @@ class TestStopHookSelfRepair(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.ctl = os.path.join(self._tmp.name, "ccc-agentctl")
+        self.ctl = os.path.join(self._tmp.name, "ccc-agent")
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -129,7 +179,7 @@ class TestStopHookSelfRepair(unittest.TestCase):
     def run_hook(self, hook):
         env = {"PATH": "/usr/bin:/bin",
                "CCC_AGENT_SESSION": "agent-x",
-               "CCC_AGENTCTL": self.ctl}
+               "CCC_AGENT_CLI": self.ctl}
         return subprocess.run(["sh", hook], env=env,
                               stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)
@@ -160,12 +210,12 @@ class TestStopHookSelfRepair(unittest.TestCase):
 
 class TestStopHookControlSocket(unittest.TestCase):
     """When CCC_AGENT_CONTROL_SOCK is set the hook signals the supervisor via
-    `ccc-agentctl finalize-turn` and propagates its exit code, instead of the
+    `ccc-agent finalize-turn` and propagates its exit code, instead of the
     store-based self-repair path."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.ctl = os.path.join(self._tmp.name, "ccc-agentctl")
+        self.ctl = os.path.join(self._tmp.name, "ccc-agent")
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -181,7 +231,7 @@ class TestStopHookControlSocket(unittest.TestCase):
     def run_hook(self, hook):
         env = {"PATH": "/usr/bin:/bin",
                "CCC_AGENT_SESSION": "agent-x",
-               "CCC_AGENTCTL": self.ctl,
+               "CCC_AGENT_CLI": self.ctl,
                "CCC_AGENT_CONTROL_SOCK": "/run/ccc-agent/control.sock"}
         return subprocess.run(["sh", hook], env=env,
                               stdout=subprocess.PIPE,

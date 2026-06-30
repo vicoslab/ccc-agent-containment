@@ -1,4 +1,4 @@
-"""ccc-agentctl per-turn socket subcommands (finalize-turn / approve-turn),
+"""ccc-agent per-turn socket subcommands (finalize-turn / approve-turn),
 driven against a real ControlServer with a fake handler."""
 
 import contextlib

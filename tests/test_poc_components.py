@@ -43,7 +43,7 @@ if os.path.isdir(_CONDA_LIB):
         _CONDA_LIB + ":" + BRANCHFS_ENV.get("LD_LIBRARY_PATH", ""))
 if BRANCHFS_BIN:
     BRANCHFS_ENV["BRANCHFS_BIN"] = BRANCHFS_BIN
-    BRANCHFS_ENV["CCC_AGENT_SOFTSANDBOX_BIN"] = BRANCHFS_BIN
+    BRANCHFS_ENV["CCC_AGENT_BRANCHFS_BIN"] = BRANCHFS_BIN
 
 
 def run(cmd, env=None, input=None, check=False):
@@ -76,8 +76,7 @@ class SandboxTestBase(unittest.TestCase):
     def run_sandbox(self, workspace, cmd, extra_args=(), input=None):
         state_dir = os.path.join(self.tmp, "state")
         argv = [
-            "bash",
-            os.path.join(BIN, "ccc-agent-softsandbox"),
+            os.path.join(BIN, "ccc-agent"), "softsandbox",
             "--workspace", workspace,
             "--state-dir", state_dir,
             "--no-confirm",
@@ -194,8 +193,7 @@ class TestSoftsandboxIsolate(SandboxTestBase):
         # to test abort flow — or directly use interactive input
         state_dir = os.path.join(self.tmp, "state")
         argv = [
-            "bash",
-            os.path.join(BIN, "ccc-agent-softsandbox"),
+            os.path.join(BIN, "ccc-agent"), "softsandbox",
             "--workspace", ws,
             "--state-dir", state_dir,
             "--isolate",
@@ -221,8 +219,7 @@ class TestSoftsandboxIsolate(SandboxTestBase):
         env["CCC_AGENT_SESSION"] = "outer-session-123"
         state_dir = os.path.join(self.tmp, "state")
         argv = [
-            "bash",
-            os.path.join(BIN, "ccc-agent-softsandbox"),
+            os.path.join(BIN, "ccc-agent"), "softsandbox",
             "--workspace", ws,
             "--state-dir", state_dir,
             "--", "bash", "-c", 'echo "nested runs directly"',
@@ -257,22 +254,19 @@ class TestPluginInstaller(SandboxTestBase):
             self.assertTrue(os.path.isfile(os.path.join(prefix, "hooks", hook)),
                             f"missing hook: {hook}")
 
-        # bin scripts
-        for script in ("ccc-agent-run", "ccc-agent-softsandbox", "ccc-agentctl"):
-            self.assertTrue(os.path.isfile(os.path.join(prefix, "bin", script)),
-                            f"missing bin: {script}")
+        # unified CLI script
+        self.assertTrue(os.path.isfile(os.path.join(prefix, "bin", "ccc-agent")))
 
-        # PATH wrappers
-        for tool in ("ccc-agent-run", "ccc-agent-softsandbox", "ccc-agentctl"):
-            wrapper = os.path.join(bin_dir, tool)
-            self.assertTrue(os.path.isfile(wrapper), f"missing wrapper: {tool}")
-            self.assertTrue(os.access(wrapper, os.X_OK), f"wrapper not exec: {tool}")
+        # PATH wrapper
+        wrapper = os.path.join(bin_dir, "ccc-agent")
+        self.assertTrue(os.path.isfile(wrapper), "missing wrapper: ccc-agent")
+        self.assertTrue(os.access(wrapper, os.X_OK), "wrapper not exec: ccc-agent")
 
     def test_installed_wrapper_sets_pythonpath(self):
         result, prefix, bin_dir = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
 
-        wrapper = os.path.join(bin_dir, "ccc-agent-run")
+        wrapper = os.path.join(bin_dir, "ccc-agent")
         with open(wrapper) as f:
             content = f.read()
         self.assertIn("PYTHONPATH", content)
@@ -286,7 +280,7 @@ class TestPluginInstaller(SandboxTestBase):
         env["PATH"] = bin_dir + ":" + env.get("PATH", "")
         env["PYTHONPATH"] = os.path.join(prefix, "lib")
         help_result = run(
-            [os.path.join(bin_dir, "ccc-agent-run"), "--help"], env=env)
+            [os.path.join(bin_dir, "ccc-agent"), "run", "--help"], env=env)
         self.assertIn("usage", help_result.stdout.lower() + help_result.stderr.lower())
 
     def test_uninstall_removes_prefix(self):
@@ -354,10 +348,10 @@ class TestShimScript(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_shim_fails_without_launcher(self):
-        """Without CCC_AGENT_LAUNCH, shim exits non-zero (1=no launcher, 127=no real bin)."""
+        """With an invalid CCC_AGENT_CLI, shim exits non-zero (1=no launcher, 127=no real bin)."""
         env = {k: v for k, v in os.environ.items()
                if k not in ("CCC_AGENT_SESSION", "CCC_AGENT_SHIM_BYPASS")}
-        env["CCC_AGENT_LAUNCH"] = "/nonexistent/ccc-agent-launch"
+        env["CCC_AGENT_CLI"] = "/nonexistent/ccc-agent"
         # Put the shim as "codex" in a first dir, then a real binary in a second dir
         with tempfile.TemporaryDirectory() as d:
             shim_dir = os.path.join(d, "shims")

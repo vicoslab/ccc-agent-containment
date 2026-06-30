@@ -33,13 +33,13 @@ class RunnerHarness(object):
         self.store = SessionStore(self.state_dir)
         self.mode = mode
 
-    def config(self, argv, mode=None, hide_patterns=(), **extra):
+    def config(self, argv, mode=None, hide_patterns=(), agent_kind="fake-agent", **extra):
         return RunnerConfig(
             store=self.store,
             backend=self.backend,
             alias_map=AliasMap.for_home("domen", home_subdir=""),
             owner="domen",
-            agent_kind="fake-agent",
+            agent_kind=agent_kind,
             agent_command=list(argv),
             workspace="/home/domen/Projects/proj-a",
             policy={
@@ -129,7 +129,7 @@ class TestRunSession(unittest.TestCase):
         with open(os.path.join(review, "summary.md")) as fh:
             summary = fh.read()
         self.assertIn(session.session_id, summary)
-        self.assertIn("ccc-agentctl commit", summary)
+        self.assertIn("ccc-agent commit", summary)
 
     def test_mount_failure_marks_session_failed(self):
         class FailingMount(FakeBranchFS):
@@ -348,6 +348,105 @@ class TestBwrapConfinement(unittest.TestCase):
         argv = seen["argv"]
         self.assertNotIn(link, argv)
         self.assertNotIn(broken_target, argv)
+
+    def _make_plugin(self, name):
+        """Create a fake trusted plugin source dir (must exist on the host)."""
+        path = os.path.join(self._tmp.name, name)
+        os.makedirs(os.path.join(path, "hooks"), exist_ok=True)
+        return path
+
+    def _capture_argv(self, command, agent_kind, agent_plugins):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            run_session(self._bwrap_config(
+                command, agent_kind=agent_kind, agent_plugins=agent_plugins))
+        return seen["argv"]
+
+    def test_bwrap_injects_claude_plugin_only_for_claude(self):
+        src = self._make_plugin("claude-ccc-containment")
+        sandbox = "/ccc-agent/plugins/claude-ccc-containment"
+        plugins = {"claude": {"src": src, "sandbox_path": sandbox,
+                              "argv": ["--plugin-dir", sandbox]}}
+
+        argv = self._capture_argv(["claude", "-p", "x"], "claude", plugins)
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        # plugin source mounted read-only at the neutral sandbox path
+        self.assertIn(("--ro-bind", src, sandbox), triples)
+        # --plugin-dir inserted right after the claude executable, user args kept
+        sep = argv.index("--")
+        self.assertEqual(argv[sep + 1:],
+                         ["claude", "--plugin-dir", sandbox, "-p", "x"])
+
+        # a non-claude command never receives the claude plugin
+        other = self._capture_argv(["bash", "-lc", "claude"], "command", plugins)
+        self.assertNotIn(src, other)
+        self.assertNotIn("--plugin-dir", other)
+
+    def test_bwrap_injects_codex_plugin_with_ensure_dirs(self):
+        src = self._make_plugin("codex-ccc-containment")
+        sandbox = "/home/domen/.codex/plugins/ccc-agent"
+        plugins = {"codex": {"src": src, "sandbox_path": sandbox,
+                             "ensure_dirs": ["/home/domen/.codex/plugins"],
+                             "argv": []}}
+
+        argv = self._capture_argv(["codex"], "codex", plugins)
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        self.assertIn(("--ro-bind", src, sandbox), triples)
+        self.assertTrue(any(argv[k] == "--dir" and
+                            argv[k + 1] == "/home/domen/.codex/plugins"
+                            for k in range(len(argv) - 1)))
+        # no argv flags configured -> command is unchanged
+        sep = argv.index("--")
+        self.assertEqual(argv[sep + 1:], ["codex"])
+
+    def test_bwrap_sets_plugin_env_for_hermes(self):
+        src = self._make_plugin("hermes-ccc-containment")
+        plugins = {"hermes": {
+            "src": src,
+            "sandbox_path": "/ccc-agent/plugins/hermes/ccc-agent",
+            "setenv": {"HERMES_BUNDLED_PLUGINS": "/ccc-agent/plugins/hermes",
+                       "HERMES_ACCEPT_HOOKS": "1"}}}
+
+        argv = self._capture_argv(["hermes", "chat"], "hermes", plugins)
+        env = {argv[k + 1]: argv[k + 2] for k in range(len(argv) - 2)
+               if argv[k] == "--setenv"}
+        self.assertEqual(env.get("HERMES_BUNDLED_PLUGINS"),
+                         "/ccc-agent/plugins/hermes")
+        self.assertEqual(env.get("HERMES_ACCEPT_HOOKS"), "1")
+
+    def test_bwrap_skips_plugin_when_source_missing(self):
+        # Graceful degradation: a missing trusted plugin dir must not be mounted
+        # and must not alter the command (process-exit review still finalizes).
+        missing = os.path.join(self._tmp.name, "does-not-exist")
+        sandbox = "/ccc-agent/plugins/claude-ccc-containment"
+        plugins = {"claude": {"src": missing, "sandbox_path": sandbox,
+                              "argv": ["--plugin-dir", sandbox]}}
+
+        argv = self._capture_argv(["claude", "-p", "x"], "claude", plugins)
+        self.assertNotIn(missing, argv)
+        self.assertNotIn("--plugin-dir", argv)
+        sep = argv.index("--")
+        self.assertEqual(argv[sep + 1:], ["claude", "-p", "x"])
+
+    def test_bwrap_skips_plugin_for_bare_agent(self):
+        # --bare disables Claude hooks/plugins, so injection would be a no-op;
+        # skip it rather than mount a plugin that will not load.
+        src = self._make_plugin("claude-ccc-containment")
+        sandbox = "/ccc-agent/plugins/claude-ccc-containment"
+        plugins = {"claude": {"src": src, "sandbox_path": sandbox,
+                              "argv": ["--plugin-dir", sandbox]}}
+
+        argv = self._capture_argv(["claude", "--bare", "-p", "x"],
+                                  "claude", plugins)
+        self.assertNotIn(src, argv)
+        self.assertNotIn("--plugin-dir", argv)
 
     def test_bwrap_binds_control_socket_and_sets_env(self):
         seen = {}

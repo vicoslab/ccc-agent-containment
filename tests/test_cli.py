@@ -1,4 +1,4 @@
-"""Tests for the ccc-agent-run / ccc-agentctl command-line layer."""
+"""Tests for the ccc-agent run / ccc-agent command-line layer."""
 
 import contextlib
 import io
@@ -7,7 +7,7 @@ import os
 import tempfile
 import unittest
 
-from ccc_agent.cli import load_config, main_ctl, main_run
+from ccc_agent.cli import load_config, main, main_ctl, main_run
 from ccc_agent.session import ProtectedRoot, SessionStore
 
 
@@ -147,6 +147,36 @@ class TestMainCtl(unittest.TestCase):
         self.assertEqual(
             main_ctl(["--config", self.h.config_path, "commit",
                       "agent-missing"], env={}), 1)
+
+
+class TestUnifiedMain(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.h = CliHarness(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_run_op_dispatches_to_contained_run(self):
+        code = main([
+            "run", "--config", self.h.config_path,
+            "--workspace", "/storage/user/Projects/proj-a",
+            "--", "sh", "-c", "echo unified > u.txt",
+        ], env={})
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.h.base, self.h.workspace_rel, "u.txt")))
+
+    def test_control_ops_are_direct(self):
+        main([
+            "run", "--config", self.h.config_path,
+            "--workspace", "/storage/user/Projects/proj-a",
+            "--", "sh", "-c", "echo x > f.txt",
+        ], env={})
+        self.assertEqual(main(["--config", self.h.config_path, "list"],
+                              env={}), 0)
+        self.assertEqual(main(["list", "--config", self.h.config_path],
+                              env={}), 0)
 
 
 class TestMainCtlCheckBeforeFinal(unittest.TestCase):

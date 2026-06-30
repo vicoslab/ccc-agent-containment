@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end test of ccc-agent-run in 'bwrap' confinement on real FUSE + real
+# End-to-end test of ccc-agent run in 'bwrap' confinement on real FUSE + real
 # bwrap.  Run from donbot-domen-cuda10 as uid 2094 (domen).
-AGENT_DIR=/storage/user/agent-workspace/conda-compute-cluster/ccc-agent-containment
+AGENT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)
 BRANCHFS=/storage/user/agent-workspace/conda-compute-cluster/worktrees/branchfs-agent-containment/target/debug/branchfs
 LD_LIB=/home/domen/conda/envs/branchfs-dev/lib
 BWRAP=/home/domen/conda/envs/codex/bin/bwrap
@@ -47,7 +47,7 @@ EOF
 
 run_agent() {
     CCC_AGENT_BRANCHFS_BIN=$BRANCHFS LD_LIBRARY_PATH=$LD_LIB \
-    "$AGENT_DIR/bin/ccc-agent-run" --config "$CONFIG_FILE" --agent fake-agent \
+    "$AGENT_DIR/bin/ccc-agent" run --config "$CONFIG_FILE" --agent fake-agent \
         -- "$@" 2>&1
 }
 check() {
@@ -84,7 +84,7 @@ run_agent sh -c 'touch /usr/should-fail 2>&1; echo rc=$?' | grep -q "rc=[^0]" \
 echo ""
 echo "=== Session list ==="
 LD_LIBRARY_PATH=$LD_LIB CCC_AGENT_BRANCHFS_BIN=$BRANCHFS \
-"$AGENT_DIR/bin/ccc-agentctl" --config "$CONFIG_FILE" list 2>&1 || true
+"$AGENT_DIR/bin/ccc-agent" --config "$CONFIG_FILE" list 2>&1 || true
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

@@ -12,10 +12,10 @@
 # Deliberately no check-before-final here: post_llm_call cannot block/feed
 # instructions back, and an advisory check would silently burn the session's
 # repair budget. Long-running Hermes sessions are closed by a human/operator
-# via `ccc-agentctl finish`, which freezes and applies policy.
+# via `ccc-agent finish`, which freezes and applies policy.
 set -eu
 
-CTL="${CCC_AGENTCTL:-ccc-agentctl}"
+CTL="${CCC_AGENT_CLI:-ccc-agent}"
 
 [ -n "${CCC_AGENT_SESSION:-}" ] || exit 0
 command -v "$CTL" >/dev/null 2>&1 || exit 0

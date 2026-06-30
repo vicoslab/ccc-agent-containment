@@ -6,7 +6,7 @@
 #                         -> approve-turn yes -> committed
 # Proves: base updated at the Stop boundary while the mount stays live, and
 # out-of-scope only reaches base via a relayed approval.
-REPO=/storage/user/agent-workspace/conda-compute-cluster/ccc-agent-containment
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)
 BRANCHFS=/storage/user/agent-workspace/conda-compute-cluster/worktrees/branchfs-agent-containment/target/debug/branchfs
 LD_LIB=/home/domen/conda/envs/branchfs-dev/lib
 BWRAP=/home/domen/conda/envs/codex/bin/bwrap
@@ -29,11 +29,11 @@ mkdir -p "$PROJ_BASE/Projects/proj-a" "$STORE" "$STATE"
 echo "seed" > "$PROJ_BASE/Projects/proj-a/base.txt"
 
 # The in-sandbox agent script (seeded into the workspace so the view exposes it).
-# ccc-agentctl is re-exposed at /ccc-agent (OUTSIDE the view) to avoid bwrap
+# ccc-agent is re-exposed at /ccc-agent (OUTSIDE the view) to avoid bwrap
 # mkdir'ing mountpoints into the FUSE view.
 cat > "$PROJ_BASE/Projects/proj-a/run-turns.sh" <<EOF
 #!/bin/sh
-CTL="/ccc-agent/bin/ccc-agentctl"
+CTL="/ccc-agent/bin/ccc-agent"
 echo "=== turn1: in-scope write + finalize ==="
 echo "turn1" > result1.txt
 "\$CTL" finalize-turn; echo "finalize1_rc=\$?"
@@ -61,7 +61,7 @@ EOF
 
 echo "=== running contained session with per-turn agent ==="
 CCC_AGENT_BRANCHFS_BIN=$BRANCHFS LD_LIBRARY_PATH=$LD_LIB \
-"$REPO/bin/ccc-agent-run" --config "$CFG" --agent e2e \
+"$REPO/bin/ccc-agent" run --config "$CFG" --agent e2e \
     -- sh /storage/user/Projects/proj-a/run-turns.sh 2>&1 | sed 's/^/  /'
 
 echo ""

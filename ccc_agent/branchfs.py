@@ -59,7 +59,7 @@ class BranchfsCli(object):
     def start_daemon(self, root):
         # Idempotent: the daemon auto-exits when its last mount goes away,
         # so every daemon-dependent operation re-ensures it first (e.g.
-        # `ccc-agentctl commit` long after the agent session unmounted).
+        # `ccc-agent commit` long after the agent session unmounted).
         self._invoke("start-daemon", "--base", root.base,
                      "--storage", root.store)
 

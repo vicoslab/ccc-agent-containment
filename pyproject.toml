@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ccc-agent-containment"
+name = "ccc-agent"
 version = "0.1.0"
 description = "BranchFS-based filesystem containment for AI agents in CCC containers"
 readme = "README.md"
@@ -14,14 +14,19 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.scripts]
-ccc-agent-run = "ccc_agent.cli:main_run"
-ccc-agent-launch = "ccc_agent.cli:main_run"
-ccc-agentctl = "ccc_agent.cli:main_ctl"
-ccc-agent-setup = "ccc_agent.setup:main"
+ccc-agent = "ccc_agent.cli:main"
 
 [tool.setuptools]
 packages = ["ccc_agent"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-"ccc_agent" = ["assets/hooks/*.sh", "assets/shims/*.sh"]
+"ccc_agent" = [
+    "assets/hooks/*.sh",
+    "assets/shims/*.sh",
+    "assets/scripts/*.sh",
+    "assets/plugins/**/*.json",
+    "assets/plugins/**/*.sh",
+    "assets/plugins/**/*.yaml",
+    "assets/plugins/**/*.py",
+]

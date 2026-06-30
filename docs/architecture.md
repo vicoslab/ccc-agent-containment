@@ -8,7 +8,7 @@ this is the implementation view.
 
 ```text
 untrusted: the agent process tree (codex/claude/hermes/... and children)
-trusted:   ccc-agent-run / ccc-agentctl / ccc_agent (supervisor)
+trusted:   ccc-agent run / ccc-agent / ccc_agent (supervisor)
            branchfs daemon + store
            ccc-fuse-sidecar (privileged FUSE broker)
 ```
@@ -27,8 +27,8 @@ inspect, commit, or abort them. This holds because:
    socket;
 3. session state (`<state_dir>/sessions`, `reviews`) is outside the view and
    additionally covered by the `.ccc-agent` deny pattern;
-4. hooks invoke `ccc-agentctl finish-turn` (records an event) and
-   `ccc-agentctl check-before-final` (reads live status; exit 2 asks the
+4. hooks invoke `ccc-agent finish-turn` (records an event) and
+   `ccc-agent check-before-final` (reads live status; exit 2 asks the
    agent to revert policy violations, bounded by
    `max_policy_repair_attempts`) — there is no hook path that freezes or
    commits.
@@ -40,7 +40,7 @@ created -> mounting -> running -> finalizing -> frozen
         -> auto-committed | pending-review | committed | aborted | failed
 ```
 
-- `ccc-agent-run` materializes one branch per protected root (branch name =
+- `ccc-agent run` materializes one branch per protected root (branch name =
   session id), mounts agent views, runs the command with
   `CCC_AGENT_SESSION` set, and finalizes on exit.
 - Freeze happens **after** completion — and, for harnesses with blocking
@@ -48,11 +48,11 @@ created -> mounting -> running -> finalizing -> frozen
   allowed the stop — then `branchfs status --json` per root feeds the policy
   engine.
 - `pending-review` keeps branches frozen; the branchfs daemon may exit (it
-  auto-exits with its last mount) — `ccc-agentctl commit/abort` re-ensures it
+  auto-exits with its last mount) — `ccc-agent commit/abort` re-ensures it
   from session metadata (`branchfs start-daemon --base ... --storage ...`).
 - Commit failures never abort: the branch is preserved and the session is
   marked `failed` for manual recovery.
-- Nested agents: a shim or `ccc-agent-run` invoked with `CCC_AGENT_SESSION`
+- Nested agents: a shim or `ccc-agent run` invoked with `CCC_AGENT_SESSION`
   already set reuses the outer session — one review unit per task, no branch
   explosion.
 
@@ -74,7 +74,16 @@ agent process. Layout the agent sees:
 /storage/user                     BranchFS agent view (rw) — overlays + hides
                                   the real underlay at the same path
 /home/<user>                      same view or its home_subdir (rw)
+/ccc-agent/plugins/…              CCC agent plugin (ro) — matching agent only
+/run/ccc-agent/control.sock       per-turn control socket (per-turn mode)
 ```
+
+The CCC agent plugin is a **read-only** bind of root-owned package assets,
+injected only for a contained run of the matching agent (Claude `--plugin-dir`,
+Codex in-sandbox plugin path, Hermes `HERMES_BUNDLED_PLUGINS`). The untrusted
+agent can load it but never edit the hook source, and a failed/missing plugin
+degrades to process-exit review — it never grants commit authority. See
+`docs/agent-integration.md`.
 
 Deliberately absent: real `/storage/*` underlays (the view `--bind` overlays
 the visible path), the BranchFS store, `daemon.sock`, `/var/run/docker.sock`,

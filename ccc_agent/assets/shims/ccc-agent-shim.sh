@@ -55,7 +55,7 @@ if [ -n "${CCC_AGENT_SESSION:-}" ]; then
     exec "$REAL_BIN" "$@"
 fi
 
-LAUNCH="${CCC_AGENT_LAUNCH:-ccc-agent-launch}"
+LAUNCH="${CCC_AGENT_CLI:-ccc-agent}"
 if ! command -v "$LAUNCH" >/dev/null 2>&1; then
     echo "ccc-agent-shim: launcher not found at $LAUNCH" >&2
     echo "ccc-agent-shim: refusing to run '$AGENT_NAME' unprotected (set CCC_AGENT_SHIM_BYPASS=1 to override)" >&2
@@ -63,4 +63,4 @@ if ! command -v "$LAUNCH" >/dev/null 2>&1; then
 fi
 
 echo "ccc-agent-shim: containing '$AGENT_NAME' via $LAUNCH (real: $REAL_BIN)" >&2
-exec "$LAUNCH" --agent "$AGENT_NAME" -- "$REAL_BIN" "$@"
+exec "$LAUNCH" run --agent "$AGENT_NAME" -- "$REAL_BIN" "$@"

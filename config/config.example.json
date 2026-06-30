@@ -1,5 +1,5 @@
 {
-  "_comment": "ccc-agent runtime config. Install (root-owned, world-readable) at /etc/ccc-agent/config.json or /opt/ccc-agent/config/config.json. The agent must never be able to write this file or anything under state_dir. In CCC images this file is generated at container startup by ccc-agent-setup (it needs runtime-only paths: the container name + /storage layout), NOT at image build.",
+  "_comment": "ccc-agent runtime config. Install (root-owned, world-readable) at /etc/ccc-agent/config.json or /opt/ccc-agent/config/config.json. The agent must never be able to write this file or anything under state_dir. In CCC images this file is generated at container startup by ccc-agent setup (it needs runtime-only paths: the container name + /storage layout), NOT at image build.",
   "_state_comment": "Holds the BranchFS mountpoints, so it MUST be under a CCC bind mount (the FUSE sidecar refuses the container overlay like /opt). /storage/user always is; it is hidden from the branch via hide_paths. For node-local speed use a bind-mounted local scratch, e.g. /storage/local/ssd/.ccc-agent.",
   "state_dir": "/storage/user/.ccc-agent",
   "backend": "branchfs",
@@ -23,6 +23,27 @@
   "cred_mounts": [],
   "cred_mask": [],
   "cred_env": {},
+
+  "_agent_plugins_comment": "Native CCC lifecycle-hook plugins, injected ONLY for a matching contained agent. ccc-agent run bind-mounts 'src' (root-owned package assets, read-only) at 'sandbox_path', inserts 'argv' right after the agent executable, and exports 'setenv'. Direct codex/claude/hermes runs load none of this and the user's own ~/.codex/~/.claude config is never edited or hidden. agent_hook_mode=plugins (default) | disabled. Per-turn hooks are best-effort: if a plugin fails to load, process-exit review still finalizes the session.",
+  "agent_hook_mode": "plugins",
+  "agent_plugins": {
+    "codex": {
+      "src": "/usr/lib/python3/dist-packages/ccc_agent/assets/plugins/codex-ccc-containment",
+      "sandbox_path": "/home/domen/.codex/plugins/ccc-agent",
+      "ensure_dirs": ["/home/domen/.codex/plugins"],
+      "argv": []
+    },
+    "claude": {
+      "src": "/usr/lib/python3/dist-packages/ccc_agent/assets/plugins/claude-ccc-containment",
+      "sandbox_path": "/ccc-agent/plugins/claude-ccc-containment",
+      "argv": ["--plugin-dir", "/ccc-agent/plugins/claude-ccc-containment"]
+    },
+    "hermes": {
+      "src": "/usr/lib/python3/dist-packages/ccc_agent/assets/plugins/hermes-ccc-containment",
+      "sandbox_path": "/ccc-agent/plugins/hermes/ccc-agent",
+      "setenv": {"HERMES_BUNDLED_PLUGINS": "/ccc-agent/plugins/hermes", "HERMES_ACCEPT_HOOKS": "1"}
+    }
+  },
 
   "_roots_comment": "ONE BranchFS root over the whole of /storage: base is the real read-through underlay, store is a node-local delta dir OUTSIDE /storage, visible is where the branch is mounted back inside the sandbox. home_subdir (relative to the branch) is bind-mounted to /home/<user>, so the home and /storage/user/<container> share a single branch instead of being overlaid twice.",
   "roots": [

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Validate the PATH-shim interception path with a REAL agent binary:
-#   shim (codex) -> ccc-agent-launch -> bwrap+branchfs -> real codex inside.
+#   shim (codex) -> ccc-agent run -> bwrap+branchfs -> real codex inside.
 # Uses `codex --version` so no LLM/auth is needed; proves the mechanics only.
-AGENT_DIR=/storage/user/agent-workspace/conda-compute-cluster/ccc-agent-containment
+AGENT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)
 BRANCHFS=/storage/user/agent-workspace/conda-compute-cluster/worktrees/branchfs-agent-containment/target/debug/branchfs
 LD_LIB=/home/domen/conda/envs/branchfs-dev/lib
 BWRAP=/home/domen/conda/envs/codex/bin/bwrap
@@ -32,17 +32,17 @@ cat > "$T/cfg.json" <<EOF
 EOF
 
 # Install the shim as "codex" ahead of the real binary on PATH.
-ln -sf "$AGENT_DIR/shims/ccc-agent-shim.sh" "$T/shims/codex"
+ln -sf "$AGENT_DIR/ccc_agent/assets/shims/ccc-agent-shim.sh" "$T/shims/codex"
 
 echo "=== invoke 'codex --version' through the shim ==="
 PATH="$T/shims:$(dirname "$REAL_CODEX"):$PATH" \
 CCC_AGENT_CONFIG="$T/cfg.json" \
-CCC_AGENT_LAUNCH="$AGENT_DIR/bin/ccc-agent-launch" \
+CCC_AGENT_CLI="$AGENT_DIR/bin/ccc-agent" \
 CCC_AGENT_BRANCHFS_BIN="$BRANCHFS" \
 LD_LIBRARY_PATH="$LD_LIB" \
     codex --version 2>&1 | sed 's/^/  /'
 
 echo ""
-echo "=== session recorded? (proves it went through ccc-agent-launch) ==="
+echo "=== session recorded? (proves it went through ccc-agent run) ==="
 LD_LIBRARY_PATH=$LD_LIB CCC_AGENT_BRANCHFS_BIN=$BRANCHFS \
-"$AGENT_DIR/bin/ccc-agentctl" --config "$T/cfg.json" list 2>&1 | sed 's/^/  /'
+"$AGENT_DIR/bin/ccc-agent" --config "$T/cfg.json" list 2>&1 | sed 's/^/  /'

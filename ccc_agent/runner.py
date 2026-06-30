@@ -1,4 +1,4 @@
-"""Session orchestration for ccc-agent-run.
+"""Session orchestration for ccc-agent run.
 
 The trusted launcher flow (first milestone: process-exit completion)::
 
@@ -78,7 +78,7 @@ class RunnerConfig(object):
                  bwrap_bin="bwrap", bwrap_proc_mode="bind",
                  bwrap_ro_binds=(), bwrap_setenv=None, per_turn=None,
                  cred_mounts=(), cred_mask=(), cred_env=None,
-                 bwrap_uid=None, bwrap_gid=None):
+                 bwrap_uid=None, bwrap_gid=None, agent_plugins=None):
         self.store = store              # SessionStore
         self.backend = backend          # BranchfsCli or FakeBranchFS
         self.alias_map = alias_map
@@ -114,16 +114,21 @@ class RunnerConfig(object):
         # for bwrap (the interactive case) and off otherwise.  `none` can opt in
         # for debugging (the hook reaches the host socket directly).
         self.per_turn = (confinement == "bwrap") if per_turn is None else per_turn
-        # Credential handling: cred_mounts = config/state dirs to re-expose
-        # read-only from the real home; cred_mask = secret files to hide
-        # (overmounted with /dev/null); cred_env = {ENV_VAR: {file, json_key}}
-        # the supervisor reads on the host and passes to the agent as env, so
-        # the auth file never enters the sandbox.
+        # Credential overrides: normal agent state dirs (e.g. ~/.codex,
+        # ~/.claude) should stay writable in the BranchFS view. cred_mounts is
+        # only for narrow special-case read-only overlays; cred_mask hides
+        # individual secret files (overmounted with /dev/null); cred_env lets
+        # the supervisor read a host auth file and pass a value via env so that
+        # particular file never enters the sandbox.
         self.cred_mounts = list(cred_mounts)
         self.cred_mask = list(cred_mask)
         self.cred_env = dict(cred_env or {})
         self.bwrap_uid = bwrap_uid
         self.bwrap_gid = bwrap_gid
+        # Native per-agent plugin injection (replaces the old config-file
+        # overlay). Each value is a spec: {src, sandbox_path, argv?, setenv?,
+        # ensure_dirs?}. Only the spec matching the contained agent is injected.
+        self.agent_plugins = dict(agent_plugins or {})
 
 
 def _agent_cwd(session, alias_map):
@@ -193,6 +198,73 @@ def _optional_ro_bind(entry):
         dest = resolved_src
 
     return (resolved_src, dest)
+
+
+def _agent_plugin_names(config):
+    """Agent identities eligible for confined-only plugin injection."""
+    names = set()
+    if config.agent_kind:
+        names.add(os.path.basename(str(config.agent_kind)).lower())
+    if config.agent_command:
+        names.add(os.path.basename(str(config.agent_command[0])).lower())
+    return names
+
+
+def _matched_agent_plugin(config):
+    """Return the validated plugin spec for the contained agent, or None.
+
+    Returns None when no plugin matches the agent, when the trusted plugin
+    source does not exist on the host (graceful degradation -> process-exit
+    review still runs), or when the agent command uses ``--bare`` (which
+    disables plugins/hooks, so per-turn injection would be a silent no-op).
+    Direct, uncontained codex/claude/hermes runs never reach here -- the
+    launcher only injects for a command it identified as that agent.
+    """
+    names = _agent_plugin_names(config)
+    if "--bare" in config.agent_command:
+        return None
+    for agent, spec in sorted(config.agent_plugins.items()):
+        if agent.lower() not in names or not isinstance(spec, dict):
+            continue
+        src = spec.get("src")
+        if not src or not os.path.isdir(os.path.realpath(src)):
+            return None  # missing trusted asset: degrade to session-end review
+        return spec
+    return None
+
+
+def _append_agent_plugin_binds(argv, spec):
+    """Mount one matched plugin's trusted source read-only into the sandbox.
+
+    The plugin source is root-owned/package-owned and always mounted read-only,
+    so the untrusted agent can load it but never edit it.  ``ensure_dirs`` are
+    created first so a mount target nested under an agent state dir (e.g.
+    ~/.codex/plugins) exists inside the namespace.
+    """
+    if spec is None:
+        return
+    for directory in spec.get("ensure_dirs", ()):
+        argv += ["--dir", directory]
+    src = spec.get("src")
+    sandbox_path = spec.get("sandbox_path")
+    if src and sandbox_path:
+        argv += ["--ro-bind", os.path.realpath(src), sandbox_path]
+
+
+def _agent_command_with_plugin(command, spec):
+    """Insert the plugin's activation flags right after the agent executable.
+
+    e.g. ``claude -p x`` + ``--plugin-dir P`` -> ``claude --plugin-dir P -p x``.
+    User-supplied arguments are preserved; Claude accepts a repeated
+    ``--plugin-dir`` so a user-provided one coexists with the CCC one.
+    """
+    command = list(command)
+    if spec is None or not command:
+        return command
+    extra = list(spec.get("argv", ()))
+    if not extra:
+        return command
+    return [command[0]] + extra + command[1:]
 
 
 def _bwrap_command(session, config, control=None):
@@ -269,9 +341,10 @@ def _bwrap_command(session, config, control=None):
             src, dest = bind
             argv += ["--ro-bind", src, dest]
 
-    # Credentials: re-expose the agent's config/state dirs read-only from the
-    # real home, then MASK the secret files (overmount /dev/null).  The real
-    # credential is passed via env below — the auth file never enters the box.
+    # Optional read-only credential overlays.  Do not use this for whole
+    # ~/.codex or ~/.claude trees in normal deployments; those need to stay
+    # writable through the BranchFS view.  The real credential can still be
+    # passed via env below for API-key style auth.
     for src in config.cred_mounts:
         bind = _optional_ro_bind(src)
         if bind is not None:
@@ -279,6 +352,9 @@ def _bwrap_command(session, config, control=None):
     for masked in config.cred_mask:
         if os.path.exists(masked):  # only mask a secret that's actually present
             argv += ["--ro-bind", "/dev/null", masked]
+
+    plugin_spec = _matched_agent_plugin(config)
+    _append_agent_plugin_binds(argv, plugin_spec)
 
     # Per-turn control socket: bind the host socket to a fixed in-sandbox path
     # so the Stop hook can signal the supervisor.  `control` is (host_sock,
@@ -302,10 +378,15 @@ def _bwrap_command(session, config, control=None):
         value = _extract_cred(spec)
         if value:
             argv += ["--setenv", var, value]
+    # Plugin activation env (e.g. HERMES_BUNDLED_PLUGINS); operator bwrap_setenv
+    # below can still override.
+    if plugin_spec is not None:
+        for key, value in sorted(plugin_spec.get("setenv", {}).items()):
+            argv += ["--setenv", key, str(value)]
     for key, value in sorted(config.bwrap_setenv.items()):
         argv += ["--setenv", key, str(value)]
     argv += ["--chdir", workdir, "--"]
-    argv += config.agent_command
+    argv += _agent_command_with_plugin(config.agent_command, plugin_spec)
     return argv
 
 
@@ -483,9 +564,10 @@ def run_session(config, env=None, before_finalize=None):
                                     config.store.state_dir)
         for spec in config.roots
     }
-    # Re-exposed credential dirs sit under the home view; the mountpoints bwrap
-    # creates would otherwise show as spurious out-of-scope deltas, so ignore
-    # their canonical paths in classification.
+    # If an operator configured optional read-only credential overlays under
+    # the home view, ignore the bwrap-created mountpoint paths in policy. Normal
+    # ~/.codex/~/.claude state is ignored by setup-generated policy instead and
+    # remains writable in the branch.
     if config.cred_mounts:
         ignore = session.policy.setdefault("ignore_patterns", [])
         for src in config.cred_mounts:
