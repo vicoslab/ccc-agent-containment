@@ -101,6 +101,10 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
                              "(repeatable)")
     parser.add_argument("--agent", default="command",
                         help="agent kind label, e.g. codex, claude, hermes")
+    parser.add_argument("--protect-agent-state", action="store_true",
+                        help="keep ~/.codex, ~/.claude, and ~/.hermes inside "
+                             "BranchFS review instead of the default shared "
+                             "direct runtime bind")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="print the full session event log (always shows "
                              "the error detail on failure)")
@@ -160,7 +164,11 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
         bwrap_uid=config.get("bwrap_uid"),
         bwrap_gid=config.get("bwrap_gid"),
         agent_plugins=({} if config.get("agent_hook_mode") == "disabled"
-                       else config.get("agent_plugins")))
+                       else config.get("agent_plugins")),
+        agent_state_binds=config.get("agent_state_binds"),
+        protect_agent_state=(args.protect_agent_state or
+                             bool(config.get("protect_agent_state", False))),
+        ensure_agent_state_dirs=bool(config.get("ensure_agent_state_dirs", False)))
     session = run_session(runner_config, env=env)
 
     sys.stderr.write("ccc-agent: session %s finished: %s\n"
@@ -194,8 +202,10 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
     if session.state == "pending-review":
         sys.stderr.write(
             "ccc-agent: review with: ccc-agent diff %s\n"
+            "ccc-agent: file diff: ccc-agent diff %s <path>\n"
             "ccc-agent: then: ccc-agent commit %s | ccc-agent abort %s\n"
-            % (session.session_id, session.session_id, session.session_id))
+            % (session.session_id, session.session_id, session.session_id,
+               session.session_id))
     if session.state == "failed":
         return 1
     if session.exit_status not in (0, None):
@@ -279,10 +289,13 @@ def main_ctl(argv=None, env=None, prog="ccc-agent"):
     parser.add_argument("--config", help="path to config.json")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
-    for name in ("show", "status", "diff", "commit", "abort", "thaw",
+    for name in ("show", "status", "commit", "abort", "thaw",
                  "finish", "finish-turn", "check-before-final"):
         p = sub.add_parser(name)
         p.add_argument("session_id")
+    dp = sub.add_parser("diff", help="show changed paths, or a unified diff for one file")
+    dp.add_argument("session_id")
+    dp.add_argument("path", nargs="?", help="optional changed file to diff")
     rv = sub.add_parser("review", help="post-session change review")
     rv.add_argument("session_id")
     rv.add_argument("--accept", action="store_true", help="commit everything")
@@ -323,7 +336,7 @@ def main_ctl(argv=None, env=None, prog="ccc-agent"):
         elif args.cmd == "status":
             controller.status(args.session_id)
         elif args.cmd == "diff":
-            controller.diff(args.session_id)
+            controller.diff(args.session_id, path=args.path)
         elif args.cmd == "review":
             commit_paths = ([p for p in args.commit_paths.split(",") if p]
                             if args.commit_paths else None)

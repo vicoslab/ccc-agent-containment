@@ -19,7 +19,12 @@
   "bwrap_ro_binds": ["/home/domen/.local:/opt/agent/.local"],
   "bwrap_setenv": {},
 
-  "_cred_comment": "Do NOT bind the whole ~/.codex or ~/.claude read-only: Codex/Claude need writable config/state/cache/session dirs. They are visible through the writable BranchFS view, and policy ignore_patterns below discard their churn unless explicitly reviewed. Use cred_mounts only for narrow special-case read-only overlays; API-key deployments can use cred_mask + cred_env for individual secret files.",
+  "_agent_state_comment": "Default: ~/.codex, ~/.claude, and ~/.hermes are shared rw agent/system state, direct-bound over the BranchFS home view and therefore outside ccc-agent commit/review/rollback. Codex/Claude/Hermes own concurrent access to their state. Set protect_agent_state=true or pass ccc-agent run --protect-agent-state to keep these dirs inside BranchFS instead.",
+  "protect_agent_state": false,
+  "ensure_agent_state_dirs": true,
+  "agent_state_binds": ["/home/domen/.codex", "/home/domen/.claude", "/home/domen/.hermes"],
+
+  "_cred_comment": "Do NOT bind the whole ~/.codex, ~/.claude, or ~/.hermes read-only: Codex/Claude/Hermes need writable config/state/cache/session dirs. They are shared rw agent_state_binds by default, outside BranchFS merge policy. Use cred_mounts only for narrow special-case read-only overlays; API-key deployments can use cred_mask + cred_env for individual secret files.",
   "cred_mounts": [],
   "cred_mask": [],
   "cred_env": {},
@@ -61,8 +66,7 @@
   "hide_patterns": [".env", ".env.*", "*.pem", "id_rsa*", "id_ed25519*", "credentials.json"],
   "policy": {
     "mode": "workspace-auto",
-    "_policy_comment": "workspace-auto: changes under the workspace (the home) auto-commit; anything else under /storage (datasets, group, other users) is read-through but flagged for review on write. Agent config/cache churn is ignored.",
-    "ignore_patterns": ["/storage/user/domen-cuda10/.codex*", "/storage/user/domen-cuda10/.claude*",
-                        "/storage/user/domen-cuda10/.config*", "/storage/user/domen-cuda10/.cache*"]
+    "_policy_comment": "workspace-auto: changes under the workspace auto-commit; anything else under /storage (datasets, group, other users) is read-through but flagged for review on write. Agent state dirs are outside BranchFS by default via agent_state_binds; cache/history noise plus ccc-agent-created bind/plugin mountpoints are ignored and discarded.",
+    "ignore_patterns": ["/storage/user/domen-cuda10/.cache*"]
   }
 }

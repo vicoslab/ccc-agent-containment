@@ -79,7 +79,9 @@ class RunnerConfig(object):
                  bwrap_bin="bwrap", bwrap_proc_mode="bind",
                  bwrap_ro_binds=(), bwrap_setenv=None, per_turn=None,
                  cred_mounts=(), cred_mask=(), cred_env=None,
-                 bwrap_uid=None, bwrap_gid=None, agent_plugins=None):
+                 bwrap_uid=None, bwrap_gid=None, agent_plugins=None,
+                 agent_state_binds=None, protect_agent_state=False,
+                 ensure_agent_state_dirs=False):
         self.store = store              # SessionStore
         self.backend = backend          # BranchfsCli or FakeBranchFS
         self.alias_map = alias_map
@@ -115,12 +117,12 @@ class RunnerConfig(object):
         # for bwrap (the interactive case) and off otherwise.  `none` can opt in
         # for debugging (the hook reaches the host socket directly).
         self.per_turn = (confinement == "bwrap") if per_turn is None else per_turn
-        # Credential overrides: normal agent state dirs (e.g. ~/.codex,
-        # ~/.claude) should stay writable in the BranchFS view. cred_mounts is
-        # only for narrow special-case read-only overlays; cred_mask hides
-        # individual secret files (overmounted with /dev/null); cred_env lets
-        # the supervisor read a host auth file and pass a value via env so that
-        # particular file never enters the sandbox.
+        # Credential overrides: agent state dirs (e.g. ~/.codex, ~/.claude,
+        # ~/.hermes) are normally direct shared rw binds, outside BranchFS.
+        # cred_mounts is only for narrow special-case read-only overlays;
+        # cred_mask hides individual secret files (overmounted with /dev/null);
+        # cred_env lets the supervisor read a host auth file and pass a value via
+        # env so that particular file never enters the sandbox.
         self.cred_mounts = list(cred_mounts)
         self.cred_mask = list(cred_mask)
         self.cred_env = dict(cred_env or {})
@@ -130,6 +132,16 @@ class RunnerConfig(object):
         # overlay). Each value is a spec: {src, sandbox_path, argv?, setenv?,
         # ensure_dirs?}. Only the spec matching the contained agent is injected.
         self.agent_plugins = dict(agent_plugins or {})
+        # By default the agent tools' own homes are shared system state, not
+        # BranchFS-protected project data.  They are bound rw over the branch
+        # view so Codex/Claude/Hermes own their config/session/cache concurrency.
+        # --protect-agent-state/config protect_agent_state omits these binds for
+        # users who intentionally want agent state inside BranchFS review.
+        self.agent_state_binds = (list(agent_state_binds)
+                                  if agent_state_binds is not None
+                                  else _default_agent_state_binds(owner))
+        self.protect_agent_state = bool(protect_agent_state)
+        self.ensure_agent_state_dirs = bool(ensure_agent_state_dirs)
 
 
 def _agent_cwd(session, alias_map):
@@ -162,6 +174,17 @@ def _primary_root(session, alias_map):
 # symlinks, not bound as dirs.
 BWRAP_RO_DIRS = ("/usr", "/etc", "/opt")
 BWRAP_USRMERGE_DIRS = ("/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32")
+AGENT_STATE_DIRS = (".codex", ".claude", ".hermes")
+
+
+def _default_agent_state_binds(owner):
+    home = "/home/%s" % owner
+    return [os.path.join(home, name) for name in AGENT_STATE_DIRS]
+
+
+def _bind_parts(entry):
+    entry = str(entry)
+    return entry.split(":", 1) if ":" in entry else (entry, entry)
 
 
 def _optional_ro_bind(entry):
@@ -298,6 +321,117 @@ def _agent_command_with_plugin(command, spec):
     return [command[0]] + extra + command[1:]
 
 
+def _infra_ignore_paths_for(path, session, config):
+    """Canonical policy ignore paths for supervisor-created sandbox plumbing.
+
+    bwrap creates mountpoint directories for ``--dir``/``--ro-bind`` targets. If
+    those targets sit under the BranchFS-backed home/storage view, BranchFS can
+    report the mountpoints as branch deltas.  They are launcher infrastructure,
+    not agent-authored work, so add exact/subtree ignores for them.  For paths
+    below $HOME, include each ancestor below the home alias (for example a
+    `~/.ccc-runtime/plugin` target adds `~/.ccc-runtime` and descendants)
+    because real BranchFS may report parent directories as structural deltas.
+    Agent-state homes have a narrower special case below.
+    """
+    if not path or not str(path).startswith("/"):
+        return []
+    try:
+        canonical = config.alias_map.canonicalize(str(path))
+        home = config.alias_map.canonicalize("/home/%s" % config.owner)
+    except ValueError:
+        return []
+
+    # Only add ignores for paths that are actually inside one of this session's
+    # protected roots.  Outside-view paths (/ccc-agent, /opt, /run, ...) cannot
+    # become BranchFS deltas and should not clutter policy artifacts.
+    protected = []
+    for root in session.protected_roots.values():
+        visible = config.alias_map.canonicalize(root.visible)
+        if is_within(canonical, visible) and canonical != visible:
+            protected.append(visible)
+    if not protected:
+        return []
+
+    # Agent-state dirs are outside BranchFS in the default shared mode, so
+    # plugin paths mounted inside them cannot become branch deltas and should
+    # not add broad `.codex`/`.claude`/`.hermes` ignores.  In opt-in protected
+    # mode, ignore only the infrastructure subpath, not the whole agent home,
+    # so user/tool config/state remains reviewable.
+    for entry in config.agent_state_binds:
+        _src, dest = _bind_parts(entry)
+        try:
+            dest_canonical = config.alias_map.canonicalize(dest)
+        except ValueError:
+            continue
+        if is_within(canonical, dest_canonical):
+            return [canonical] if config.protect_agent_state else []
+
+    if is_within(canonical, home) and canonical != home:
+        rel = os.path.relpath(canonical, home)
+        current = home
+        paths = []
+        for part in rel.split(os.sep):
+            if not part or part == ".":
+                continue
+            current = os.path.join(current, part)
+            paths.append(current)
+        return paths
+    return [canonical]
+
+
+def _add_session_infra_ignores(session, config):
+    """Ignore ccc-agent-owned bind/plugin/mask targets inside branch views."""
+    ignore = session.policy.setdefault("ignore_patterns", [])
+
+    def add(path):
+        for canonical in _infra_ignore_paths_for(path, session, config):
+            if canonical not in ignore:
+                ignore.append(canonical)
+
+    for entry in list(config.bwrap_ro_binds) + list(config.cred_mounts):
+        bind = _optional_ro_bind(entry)
+        if bind is not None:
+            add(bind[1])
+    for masked in config.cred_mask:
+        if os.path.exists(masked):
+            add(masked)
+
+    plugin_spec = _matched_agent_plugin(config)
+    if plugin_spec is not None:
+        add(plugin_spec.get("sandbox_path"))
+        for directory in plugin_spec.get("ensure_dirs", ()):
+            add(directory)
+
+
+def _ensure_shared_agent_state_dirs(config):
+    """Create real shared agent-state dirs before BranchFS branch creation.
+
+    This makes the default same-path binds visible as inherited directories in
+    the branch view, so bwrap does not create `.codex`/`.claude`/`.hermes`
+    mountpoint deltas while preparing the sandbox.
+    """
+    if config.protect_agent_state or not config.ensure_agent_state_dirs:
+        return
+    for entry in config.agent_state_binds:
+        src, _dest = _bind_parts(entry)
+        if not src or not str(src).startswith("/"):
+            continue
+        os.makedirs(os.path.realpath(src), mode=0o700, exist_ok=True)
+
+
+def _append_shared_agent_state_binds(argv, config):
+    """Bind Codex/Claude/Hermes state rw over the BranchFS home view."""
+    if config.protect_agent_state:
+        return
+    for entry in config.agent_state_binds:
+        src, dest = _bind_parts(entry)
+        if not src or not dest or not src.startswith("/") or not dest.startswith("/"):
+            continue
+        src = os.path.realpath(src)
+        if os.path.isdir(src):
+            argv += ["--bind", src, dest]
+
+
 def _bwrap_command(session, config, control=None):
     """Build a bubblewrap command that confines the agent rootlessly.
 
@@ -356,6 +490,12 @@ def _bwrap_command(session, config, control=None):
             continue
         argv += ["--bind", root.mount, alias_map.canonicalize(root.visible)]
 
+    # Agent-owned state is deliberately outside BranchFS by default: bind the
+    # real shared Codex/Claude/Hermes homes back over the protected home view.
+    # Plugins/hooks are mounted read-only after this so trusted CCC assets still
+    # override any writable user/plugin state.
+    _append_shared_agent_state_binds(argv, config)
+
     # Re-expose the agent runtime + creds read-only.  Each entry is "src" (bind
     # at the same path) or "src:dest" (bind src at dest).  IMPORTANT: a dest
     # UNDER a view (/storage/user, /home/<user>) makes bwrap mkdir mountpoints
@@ -373,9 +513,9 @@ def _bwrap_command(session, config, control=None):
             argv += ["--ro-bind", src, dest]
 
     # Optional read-only credential overlays.  Do not use this for whole
-    # ~/.codex or ~/.claude trees in normal deployments; those need to stay
-    # writable through the BranchFS view.  The real credential can still be
-    # passed via env below for API-key style auth.
+    # ~/.codex/~/.claude/~/.hermes trees in normal deployments; direct
+    # agent_state_binds keep them shared writable outside BranchFS. The real
+    # credential can still be passed via env below for API-key style auth.
     for src in config.cred_mounts:
         bind = _optional_ro_bind(src)
         if bind is not None:
@@ -598,16 +738,7 @@ def run_session(config, env=None, before_finalize=None):
         )
         for spec in config.roots
     }
-    # If an operator configured optional read-only credential overlays under
-    # the home view, ignore the bwrap-created mountpoint paths in policy. Normal
-    # ~/.codex/~/.claude state is ignored by setup-generated policy instead and
-    # remains writable in the branch.
-    if config.cred_mounts:
-        ignore = session.policy.setdefault("ignore_patterns", [])
-        for src in config.cred_mounts:
-            canonical = config.alias_map.canonicalize(src)
-            if canonical not in ignore:
-                ignore.append(canonical)
+    _add_session_infra_ignores(session, config)
     config.store.save(session)
 
     control_server = None
@@ -615,6 +746,7 @@ def run_session(config, env=None, before_finalize=None):
     try:
         session.transition("mounting")
         config.store.save(session)
+        _ensure_shared_agent_state_dirs(config)
         for root in session.protected_roots.values():
             config.backend.start_daemon(root)
             config.backend.create_branch(root)

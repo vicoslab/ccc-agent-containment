@@ -59,7 +59,7 @@ A session that exits with un-committed changes stays as a reviewable branch:
 ```bash
 ccc-agent list                              # sessions + states
 ccc-agent review <session>                  # browse the diff
-ccc-agent review <session> --accept         # commit everything
+ccc-agent review <session> --accept         # commit policy-visible changes; ignored runtime noise is discarded
 ccc-agent review <session> --reject         # discard everything
 ccc-agent review <session> --commit a,b     # commit only a,b (file-by-file)
 ccc-agent review <session> --emit-patch > c.patch  # line-by-line: prune hunks…
@@ -71,7 +71,7 @@ Or directly via the BranchFS CLI (branch name == session id):
 ```bash
 branchfs list   --storage <store>
 branchfs status <session> --storage <store> --json
-branchfs commit-branch <session> --storage <store>   # apply deltas to base
+branchfs commit-branch <session> --storage <store>   # low-level: applies all deltas, bypasses ccc-agent ignores
 branchfs abort-branch  <session> --storage <store>   # discard the branch
 ```
 
@@ -83,28 +83,36 @@ for the same run is bundled nearby, e.g.
 `<state_dir>/<session-id>/control/control.sock`. BranchFS stores/deltas stay at
 the configured root `store` paths.
 
-### Credentials
+### Credentials and agent state
 
-Agents authenticate from `~/.codex` / `~/.claude`. These directories should
-remain **writable inside the BranchFS view**: Codex/Claude create logs, session
-state, caches, lock files, and sometimes refreshed token material there. Binding
-the whole directories read-only makes the real agents fail.
+`~/.codex`, `~/.claude`, and `~/.hermes` are **agent/system state**, not
+BranchFS-protected project data by default. `ccc-agent run` direct-binds those
+real shared directories read-write over the BranchFS home view so the tools can
+manage their own config, sessions, caches, locks, and token refreshes. Changes
+there persist immediately and are not committed, reviewed, or rolled back by
+BranchFS; Codex/Claude/Hermes own their concurrent access semantics across
+sessions/nodes.
 
-The containment plugin itself must not live there. In system deployments,
+Use `ccc-agent run --protect-agent-state` or config `protect_agent_state: true`
+only when you intentionally want those dirs inside BranchFS review and are
+prepared to handle tool-specific merging/conflicts yourself.
+
+The containment plugin itself must not be writable agent state. In system deployments,
 install the package/hooks as root-owned files under `/usr` (or another OS path
-that bwrap exposes read-only), write `config.json` under `/etc/ccc-agent`, and
-use Claude managed settings under `/etc/claude-code`. The user-writable
-`~/.codex` / `~/.claude` trees are only agent state/auth input; any deltas they
-produce are covered by policy `ignore_patterns` and discarded unless explicitly
-reviewed.
+that bwrap exposes read-only) and write `config.json` under `/etc/ccc-agent`.
+Do not edit the user's normal Codex/Claude/Hermes config or globally install
+direct-run managed settings just to enable containment hooks. For a contained
+run only, the trusted launcher mounts CCC plugin assets read-only, e.g. Claude's
+`--plugin-dir`, Codex's in-sandbox plugin path, or Hermes'
+`HERMES_BUNDLED_PLUGINS`.
 
 `cred_mounts` remains available only for narrow special-case read-only overlays;
-do **not** use it for the whole `~/.codex` or `~/.claude` directories. API-key
-deployments can still combine `cred_mask` (overmount an individual secret file
-with `/dev/null`) and `cred_env` (supervisor reads a credential and passes it as
-env). OAuth-subscription logins (ChatGPT / Claude account — the common case)
-authenticate from token files, so those files must remain readable through the
-BranchFS view.
+do **not** use it for the whole `~/.codex`, `~/.claude`, or `~/.hermes`
+directories. API-key deployments can still combine `cred_mask` (overmount an
+individual secret file with `/dev/null`) and `cred_env` (supervisor reads a
+credential and passes it as env). OAuth-subscription logins (ChatGPT / Claude
+account — the common case) authenticate from token files, so those files must
+remain readable through the shared agent-state bind.
 
 ## Layers
 
@@ -169,8 +177,11 @@ For example, these load the matching plugin:
 - `ccc-agent run -- /path/to/claude -p ...`
 
 Use `--agent <name>` only for an explicit override; explicit selection wins over
-executable-path inference.
-Disable injection with `--no-agent-plugins` (alias `--no-hooks`).
+executable-path inference. Disable injection with `--no-agent-plugins` (alias
+`--no-hooks`). Agent state is shared pass-through by default; pass
+`ccc-agent run --protect-agent-state` for one run, or generate/set
+`protect_agent_state: true` in config, to keep `~/.codex`, `~/.claude`, and
+`~/.hermes` inside BranchFS review.
 
 The plugins live under the installed package (`ccc_agent/assets/plugins/…`),
 which is under `/usr` for a system install and therefore exposed read-only

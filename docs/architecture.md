@@ -76,15 +76,23 @@ agent process. Layout the agent sees:
 /storage/user                     BranchFS agent view (rw) — overlays + hides
                                   the real underlay at the same path
 /home/<user>                      same view or its home_subdir (rw)
-/ccc-agent/plugins/…              CCC agent plugin (ro) — matching agent only
+~/.codex ~/.claude ~/.hermes      direct shared rw binds over the home view
+                                  (default agent/system state, not BranchFS)
+/ccc-agent/plugins/…              CCC agent plugin root (ro) when supported
+~/.codex/plugins/ccc-agent       Codex plugin scan path (ro bind on top of
+                                  shared ~/.codex when Codex requires it)
 /run/ccc-agent/control.sock       per-turn control socket (per-turn mode)
 ```
 
 The CCC agent plugin is a **read-only** bind of root-owned package assets,
 injected only for a contained run of the matching agent (Claude `--plugin-dir`,
 Codex in-sandbox plugin path, Hermes `HERMES_BUNDLED_PLUGINS`). The untrusted
-agent can load it but never edit the hook source, and a failed/missing plugin
-degrades to process-exit review — it never grants commit authority. See
+agent can load it but never edit the hook source. Agent tool homes (`~/.codex`,
+`~/.claude`, `~/.hermes`) are direct shared rw binds by default, outside BranchFS
+commit/review/rollback. Set `protect_agent_state: true` or run with
+`--protect-agent-state` to omit those binds and make the user handle any
+agent-state merges through BranchFS review. A failed/missing plugin degrades to
+process-exit review — it never grants commit authority. See
 `docs/agent-integration.md`.
 
 Deliberately absent: real `/storage/*` underlays (the view `--bind` overlays

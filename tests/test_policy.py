@@ -11,6 +11,7 @@ from ccc_agent.policy import (
     Change,
     PolicyConfig,
     evaluate,
+    filter_ignored,
     path_matches,
 )
 
@@ -162,6 +163,30 @@ class TestEvaluate(unittest.TestCase):
         self.assertEqual(data["total_changes"], 1)
         self.assertTrue(data["deny_matches"])  # .ssh is default-denied
         self.assertTrue(data["out_of_scope"])
+
+    def test_default_ignores_history_noise_but_not_agent_state(self):
+        changes = [
+            Change(op="A", path="/storage/user/.codex/config.toml"),
+            Change(op="M", path="/storage/user/.claude/settings.json"),
+            Change(op="M", path="/storage/user/.hermes/config.yaml"),
+            Change(op="M", path="/storage/user/.bash_history"),
+            Change(op="M", path="/storage/user/.python_history"),
+            Change(op="A", path=f"{WORKSPACE}/ok.py"),
+        ]
+        filtered = filter_ignored(changes, cfg(), AMAP)
+        self.assertEqual([c.path for c in filtered], [
+            "/storage/user/.codex/config.toml",
+            "/storage/user/.claude/settings.json",
+            "/storage/user/.hermes/config.yaml",
+            f"{WORKSPACE}/ok.py",
+        ])
+
+    def test_shell_startup_files_are_reviewed_not_ignored(self):
+        changes = [Change(op="M", path="/storage/user/.bashrc")]
+        filtered = filter_ignored(changes, cfg(), AMAP)
+        self.assertEqual([c.path for c in filtered], ["/storage/user/.bashrc"])
+        d = evaluate(filtered, cfg(), AMAP)
+        self.assertEqual(d.decision, PENDING_REVIEW)
 
 
 if __name__ == "__main__":

@@ -51,10 +51,31 @@ DEFAULT_DENY_PATTERNS = (
     ".ccc-agent",  # session/policy/review state must never be agent-writable
 )
 
-# Always-ignored sandbox/filesystem noise (never the agent's work): NFS
-# silly-rename artifacts left when an open file is deleted/renamed on NFS.
+# Always-ignored sandbox/filesystem/runtime noise: these paths are not useful
+# agent deliverables and should never be auto- or manually committed by the
+# supervisor.  Keep executable startup config (e.g. .bashrc) in the deny set
+# instead: history/cache/state is disposable, startup/config policy is reviewable.
 DEFAULT_IGNORE_PATTERNS = (
+    # NFS silly-rename artifacts left when an open file is deleted/renamed.
     "*/.nfs*",
+    # Generic runtime caches/logs.
+    ".cache",
+    ".npm/_logs",
+    # Interactive shell/REPL/client history files updated as normal operation.
+    ".bash_history",
+    ".zsh_history",
+    ".zhistory",
+    ".python_history",
+    ".sqlite_history",
+    ".psql_history",
+    ".mysql_history",
+    ".rediscli_history",
+    ".node_repl_history",
+    ".lesshst",
+    ".wget-hsts",
+    ".config/fish/fish_history",
+    ".local/share/fish/fish_history",
+    ".ipython/profile_default/history.sqlite",
 )
 
 

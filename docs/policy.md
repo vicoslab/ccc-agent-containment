@@ -45,6 +45,30 @@ Default deny set (see `policy.DEFAULT_DENY_PATTERNS`): SSH/GPG material,
 `.condarc`, and `.ccc-agent` (supervisor state). Override per deployment via
 `deny_patterns` in policy config; extend per run with `ccc-agent run --hide`.
 
+Default ignore set (see `policy.DEFAULT_IGNORE_PATTERNS`): launcher/runtime noise
+that should never become a deliverable, including NFS `.nfs*` silly-renames,
+caches/logs such as `~/.cache` and `~/.npm/_logs`, and interactive history files
+such as `~/.bash_history`, `~/.zsh_history`, `~/.python_history`, `~/.lesshst`,
+and common database/REPL histories. Ignored changes are removed before turn
+checks, review artifacts, auto-commit, and manual `ccc-agent commit/review
+--accept`; they are discarded with the branch unless a human uses lower-level
+BranchFS tools outside the normal supervisor flow.
+
+Agent tool homes are handled separately: by default `~/.codex`, `~/.claude`, and
+`~/.hermes` are **direct shared rw binds outside BranchFS**, not ignored deltas.
+They are system/agent state, so changes there persist immediately and are owned
+by Codex/Claude/Hermes concurrency semantics. Use `ccc-agent run
+--protect-agent-state` or config `protect_agent_state: true` only if you want
+those directories inside BranchFS status/review/commit.
+
+`ccc-agent run` also adds per-session ignores for its own bwrap/plugin plumbing
+when a bind target lands inside a BranchFS-backed view: read-only `bwrap_ro_binds`,
+`cred_mounts`/`cred_mask`, and the matched agent plugin's `sandbox_path` and
+`ensure_dirs`. Prefer mounting trusted runtime/plugin assets outside the view
+(`/ccc-agent`, `/opt/...`) when the agent supports it; when a native agent (for
+example Codex plugin discovery) requires an in-home path, those mountpoint deltas
+are treated as infrastructure and ignored.
+
 ## Secret hiding: what is and is not guaranteed
 
 With `hide_paths` on a root (e.g. `.ssh`, `.netrc`, `.aws`):

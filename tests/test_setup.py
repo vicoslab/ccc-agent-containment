@@ -124,8 +124,13 @@ class TestSetupConfig(unittest.TestCase):
             self.assertNotIn("config.toml", spec.get("sandbox_path", ""))
             self.assertNotIn("settings.json", spec.get("sandbox_path", ""))
         ignore = cfg["policy"]["ignore_patterns"]
-        self.assertIn("/storage/user/domen-cuda10/.codex*", ignore)
-        self.assertIn("/storage/user/domen-cuda10/.claude*", ignore)
+        self.assertNotIn("/storage/user/domen-cuda10/.codex*", ignore)
+        self.assertNotIn("/storage/user/domen-cuda10/.claude*", ignore)
+        self.assertEqual(cfg["protect_agent_state"], False)
+        self.assertTrue(cfg["ensure_agent_state_dirs"])
+        self.assertIn("/home/domen/.codex", cfg["agent_state_binds"])
+        self.assertIn("/home/domen/.claude", cfg["agent_state_binds"])
+        self.assertIn("/home/domen/.hermes", cfg["agent_state_binds"])
         self.assertEqual(cfg["roots"][0]["visible"], "/storage")
         self.assertEqual(cfg["roots"][0]["home_subdir"], "user/domen-cuda10")
         self.assertNotIn("workspace", cfg)
@@ -148,8 +153,12 @@ class TestSetupConfig(unittest.TestCase):
                          ["--plugin-dir",
                           "/ccc-agent/plugins/claude-ccc-containment"])
         ignore = cfg["policy"]["ignore_patterns"]
-        self.assertIn("/home/domen/.codex*", ignore)
-        self.assertIn("/home/domen/.claude*", ignore)
+        self.assertNotIn("/home/domen/.codex*", ignore)
+        self.assertNotIn("/home/domen/.claude*", ignore)
+        self.assertIn("/home/domen/.codex", cfg["agent_state_binds"])
+        self.assertIn("/home/domen/.claude", cfg["agent_state_binds"])
+        self.assertIn("/home/domen/.hermes", cfg["agent_state_binds"])
+        self.assertFalse(cfg["protect_agent_state"])
         self.assertNotIn("workspace", cfg)
 
     def test_setup_uses_plugins_not_global_agent_config_overlays(self):
@@ -192,6 +201,21 @@ class TestSetupConfig(unittest.TestCase):
                     cfg = json.load(fh)
                 self.assertEqual(cfg["agent_plugins"], {})
                 self.assertEqual(cfg["agent_hook_mode"], "disabled")
+
+    def test_setup_protect_agent_state_flag_sets_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(home)
+            config_path = os.path.join(tmp, "config.json")
+            with mock.patch.dict(os.environ, {"HOME": home, "USER": "domen"}, clear=False):
+                rc = setup_mod.main([
+                    "--user", "--config", config_path,
+                    "--state-dir", os.path.join(tmp, "state"),
+                    "--protect-agent-state"])
+            self.assertEqual(rc, 0)
+            with open(config_path) as fh:
+                cfg = json.load(fh)
+            self.assertTrue(cfg["protect_agent_state"])
 
 
 if __name__ == "__main__":

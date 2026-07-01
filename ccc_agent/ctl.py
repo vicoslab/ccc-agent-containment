@@ -13,8 +13,9 @@ import shutil
 import subprocess
 import sys
 
-from .policy import PolicyConfig, classify
+from .policy import PolicyConfig, classify, filter_ignored
 from .runner import finalize_session
+from .paths import is_within
 from .session import TERMINAL_STATES
 
 # check-before-final outcomes (stable strings for hook adapters and logs)
@@ -78,10 +79,12 @@ class Controller(object):
                              change.bytes))
         return session
 
-    def diff(self, session_id, out=None):
+    def diff(self, session_id, path=None, out=None):
         """Stored review diff; falls back to live status when absent."""
         out = out or sys.stdout
         session = self._load(session_id)
+        if path is not None:
+            return self._diff_path(session, path, out)
         review = self.store.review_dir(session_id)
         wrote = False
         if os.path.isdir(review):
@@ -99,12 +102,94 @@ class Controller(object):
             return self.status(session_id, out=out)
         return session
 
+    def _path_candidates(self, session, root, path):
+        """Root-relative candidate relpaths for a user-supplied diff path."""
+        visible = self.alias_map.canonicalize(root.visible)
+        candidates = set()
+        if path.startswith("/"):
+            canonical = self.alias_map.canonicalize(path)
+            if is_within(canonical, visible):
+                candidates.add(os.path.relpath(canonical, visible))
+            return candidates
+
+        rel = os.path.normpath(path)
+        if rel not in ("", ".") and not rel.startswith("../"):
+            candidates.add(rel)
+
+        workspace_path = os.path.normpath(os.path.join(session.workspace, path))
+        workspace_path = self.alias_map.canonicalize(workspace_path)
+        if is_within(workspace_path, visible):
+            candidates.add(os.path.relpath(workspace_path, visible))
+        return candidates
+
+    def _matching_change(self, session, path):
+        matches = []
+        absolute = path.startswith("/")
+        canonical_path = self.alias_map.canonicalize(path) if absolute else None
+        for root, change in self._changes(session):
+            rel, _delta, _base = self._store_paths(root, change)
+            if absolute:
+                if self.alias_map.canonicalize(change.path) == canonical_path:
+                    matches.append((root, change))
+            elif os.path.normpath(rel) in self._path_candidates(session, root, path):
+                matches.append((root, change))
+        if not matches:
+            raise ControlError("no changed file matching %s" % path)
+        if len(matches) > 1:
+            raise ControlError("path %s is ambiguous (%d matches)"
+                               % (path, len(matches)))
+        return matches[0]
+
+    def _read_text_lines(self, path, label):
+        if not os.path.isfile(path):
+            return []
+        with open(path, "rb") as fh:
+            data = fh.read()
+        if b"\0" in data:
+            raise ControlError("cannot diff binary file: %s" % label)
+        return data.decode("utf-8", errors="replace").splitlines(True)
+
+    def _diff_path(self, session, path, out):
+        root, change = self._matching_change(session, path)
+        if change.kind != "file" and change.op != "D":
+            raise ControlError("cannot diff non-file path: %s" % change.path)
+        rel, delta, base = self._store_paths(root, change)
+        old = self._read_text_lines(base, "base:" + rel)
+        new = []
+        if change.op != "D":
+            if not os.path.isfile(delta):
+                raise ControlError("branch delta missing for %s" % change.path)
+            new = self._read_text_lines(delta, "branch:" + rel)
+        for line in difflib.unified_diff(old, new,
+                                         fromfile="a/" + rel,
+                                         tofile="b/" + rel):
+            out.write(line if line.endswith("\n") else line + "\n")
+        return session
+
     # -- mutating ------------------------------------------------------------
     def commit(self, session_id):
         session = self._load(session_id)
         self._require_state(session, ("pending-review", "frozen"), "commit")
+        # Commit only the policy-visible changes.  Ignored launcher/runtime
+        # noise (plugin mountpoints, agent state, caches/history, .nfs files)
+        # stays in the branch and is discarded, matching auto-commit behavior.
+        changes = self._changes(session)
+        try:
+            for root, change in changes:
+                self._apply_change_from_store(root, change)
+        except Exception as exc:
+            session.add_event("error", "commit failed, branch preserved: %s" % exc)
+            self.store.save(session)
+            raise ControlError("commit failed, branch preserved: %s" % exc)
         for name, root in sorted(session.protected_roots.items()):
-            self.backend.commit(root)
+            try:
+                self.backend.abort(root)
+            except Exception:
+                pass
+            try:
+                self.backend.unmount(root)
+            except Exception:
+                pass
             session.add_event("committed-root", name)
         session.transition("committed")
         self.store.save(session)
@@ -151,10 +236,14 @@ class Controller(object):
                 os.makedirs(parent, exist_ok=True)
             shutil.copy2(delta, base)
 
-    def _changes(self, session):
+    def _changes(self, session, include_ignored=False):
         out = []
+        config = PolicyConfig.from_dict(session.policy)
         for _name, root in sorted(session.protected_roots.items()):
-            for change in self.backend.status(root):
+            changes = self.backend.status(root)
+            if not include_ignored:
+                changes = filter_ignored(changes, config, self.alias_map)
+            for change in changes:
                 out.append((root, change))
         return out
 
@@ -289,6 +378,7 @@ class Controller(object):
         changes = []
         for _name, root in sorted(session.protected_roots.items()):
             changes.extend(self.backend.status(root))
+        changes = filter_ignored(changes, config, self.alias_map)
         out_of_scope, deny_matches = classify(changes, config, self.alias_map)
 
         if not out_of_scope and not deny_matches:

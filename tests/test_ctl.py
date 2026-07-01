@@ -24,13 +24,14 @@ class CtlHarness(object):
         self.store = SessionStore(self.state_dir)
         self.alias_map = AliasMap.for_home("domen", home_subdir="")
 
-    def run_agent(self, argv, mode="workspace-auto"):
+    def run_agent(self, argv, mode="workspace-auto", ignore_patterns=()):
         return run_session(RunnerConfig(
             store=self.store, backend=self.backend, alias_map=self.alias_map,
             owner="domen", agent_kind="fake", agent_command=list(argv),
             workspace="/home/domen/Projects/proj-a",
             policy={"mode": mode,
-                    "allowed_scopes": ["/home/domen/Projects/proj-a"]},
+                    "allowed_scopes": ["/home/domen/Projects/proj-a"],
+                    "ignore_patterns": list(ignore_patterns)},
             roots=[RootSpec(name="storage_user", base=self.base,
                             store=os.path.join(self.tmp, "stores",
                                                "storage_user"),
@@ -99,6 +100,25 @@ class TestController(unittest.TestCase):
         self.h.controller().diff(session.session_id, out=out)
         self.assertIn("/storage/user/outside.txt", out.getvalue())
 
+    def test_diff_path_prints_unified_base_delta_diff(self):
+        base_path = os.path.join(self.h.base, "Projects", "proj-a",
+                                 "notes.txt")
+        with open(base_path, "w") as fh:
+            fh.write("old\n")
+        session = self.h.run_agent([
+            "sh", "-c", "printf 'old\\nnew\\n' > notes.txt",
+        ], mode="manual")
+        self.assertEqual(session.state, "pending-review")
+
+        out = io.StringIO()
+        self.h.controller().diff(session.session_id, "notes.txt", out=out)
+
+        text = out.getvalue()
+        self.assertIn("--- a/Projects/proj-a/notes.txt", text)
+        self.assertIn("+++ b/Projects/proj-a/notes.txt", text)
+        self.assertIn("+new", text)
+        self.assertNotIn("/storage/user/outside.txt", text)
+
     def test_commit_pending_session(self):
         session = self.pending_session()
         self.h.controller().commit(session.session_id)
@@ -106,6 +126,22 @@ class TestController(unittest.TestCase):
         self.assertEqual(reloaded.state, "committed")
         self.assertTrue(os.path.isfile(os.path.join(self.h.base,
                                                     "outside.txt")))
+
+    def test_commit_pending_session_does_not_apply_ignored_infra(self):
+        session = self.h.run_agent([
+            "sh", "-c",
+            "mkdir -p ../../.codex/plugins/ccc-agent; "
+            "echo hook > ../../.codex/plugins/ccc-agent/hooks.json; "
+            "echo x > ../../outside.txt",
+        ], ignore_patterns=["/storage/user/.codex"])
+        self.assertEqual(session.state, "pending-review")
+
+        self.h.controller().commit(session.session_id)
+
+        self.assertTrue(os.path.isfile(os.path.join(self.h.base,
+                                                    "outside.txt")))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.h.base, ".codex", "plugins", "ccc-agent", "hooks.json")))
 
     def test_abort_pending_session(self):
         session = self.pending_session()
@@ -206,6 +242,18 @@ class TestCheckBeforeFinal(unittest.TestCase):
         self.assertEqual(result, ctl.CHECK_REPAIR)
         self.assertEqual(reloaded.repair_attempts, 1)
         self.assertIn(".env", text)
+
+    def test_check_before_final_ignores_infra_patterns(self):
+        session, root = self.h.running_session()
+        session.policy["ignore_patterns"] = ["/storage/user/.codex"]
+        self.h.store.save(session)
+
+        self.touch(root, ".codex/plugins/ccc-agent/hooks.json", "{}\n")
+
+        result, text, reloaded = self.check(session.session_id)
+        self.assertEqual(result, ctl.CHECK_ALLOW)
+        self.assertEqual(reloaded.repair_attempts, 0)
+        self.assertIn("clean", text)
 
     def test_exhausted_budget_defers_to_review(self):
         session, root = self.h.running_session(max_repair_attempts=2)

@@ -173,6 +173,49 @@ class TestMainRun(unittest.TestCase):
         self.assertEqual(seen["config"].agent_command,
                          ["/opt/agents/claude", "-p", "hello"])
 
+    def test_agent_state_binds_from_config_reach_runner(self):
+        seen = {}
+        binds = ["/real/codex:/home/domen/.codex",
+                 "/real/claude:/home/domen/.claude",
+                 "/real/hermes:/home/domen/.hermes"]
+        with open(self.h.config_path) as fh:
+            data = json.load(fh)
+        data["agent_state_binds"] = binds
+        data["ensure_agent_state_dirs"] = True
+        with open(self.h.config_path, "w") as fh:
+            json.dump(data, fh)
+
+        def fake_run_session(config, env=None):
+            seen["config"] = config
+            return SimpleNamespace(session_id="agent-test", state="aborted",
+                                   events=[], exit_status=0)
+
+        with mock.patch("ccc_agent.cli.run_session",
+                        side_effect=fake_run_session):
+            code = main_run(["--config", self.h.config_path, "--", "true"],
+                            env={})
+
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["config"].agent_state_binds, binds)
+        self.assertTrue(seen["config"].ensure_agent_state_dirs)
+        self.assertFalse(seen["config"].protect_agent_state)
+
+    def test_protect_agent_state_flag_overrides_shared_default(self):
+        seen = {}
+
+        def fake_run_session(config, env=None):
+            seen["config"] = config
+            return SimpleNamespace(session_id="agent-test", state="aborted",
+                                   events=[], exit_status=0)
+
+        with mock.patch("ccc_agent.cli.run_session",
+                        side_effect=fake_run_session):
+            code = main_run(["--config", self.h.config_path,
+                             "--protect-agent-state", "--", "true"], env={})
+
+        self.assertEqual(code, 0)
+        self.assertTrue(seen["config"].protect_agent_state)
+
     def test_shortcut_agent_flags_are_not_supported(self):
         for flag in ("--codex", "--claude", "--hermes"):
             with self.subTest(flag=flag):
@@ -204,6 +247,27 @@ class TestMainCtl(unittest.TestCase):
         sid = self.h.sessions()[0]
         self.assertEqual(main_ctl(["--config", self.h.config_path, "show",
                                    sid], env={}), 0)
+
+    def test_diff_accepts_optional_path(self):
+        base_path = os.path.join(self.h.base, self.h.workspace_rel, "cli.txt")
+        with open(base_path, "w") as fh:
+            fh.write("old\n")
+        self.assertEqual(main_run([
+            "--config", self.h.config_path,
+            "--workspace", "/storage/user/Projects/proj-a",
+            "--policy", "manual",
+            "--", "sh", "-c", "printf 'old\\nnew\\n' > cli.txt",
+        ], env={}), 0)
+        sid = self.h.sessions()[0]
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main_ctl(["--config", self.h.config_path, "diff", sid,
+                             "cli.txt"], env={})
+
+        self.assertEqual(code, 0)
+        self.assertIn("--- a/Projects/proj-a/cli.txt", out.getvalue())
+        self.assertIn("+new", out.getvalue())
 
     def test_ctl_error_returns_nonzero(self):
         self.assertEqual(

@@ -372,7 +372,7 @@ class TestBwrapConfinement(unittest.TestCase):
         os.makedirs(os.path.join(path, "hooks"), exist_ok=True)
         return path
 
-    def _capture_argv(self, command, agent_kind, agent_plugins):
+    def _capture_argv(self, command, agent_kind, agent_plugins, **extra):
         seen = {}
 
         def fake_run(argv, **kwargs):
@@ -381,8 +381,21 @@ class TestBwrapConfinement(unittest.TestCase):
 
         with mock.patch.object(subprocess, "run", side_effect=fake_run):
             run_session(self._bwrap_config(
-                command, agent_kind=agent_kind, agent_plugins=agent_plugins))
+                command, agent_kind=agent_kind, agent_plugins=agent_plugins,
+                **extra))
         return seen["argv"]
+
+    def _agent_state_binds(self):
+        paths = {}
+        binds = []
+        for name in ("codex", "claude", "hermes"):
+            path = os.path.join(self._tmp.name, "real-agent-state", name)
+            os.makedirs(path)
+            paths[name] = path
+        binds.append(paths["codex"] + ":/home/domen/.codex")
+        binds.append(paths["claude"] + ":/home/domen/.claude")
+        binds.append(paths["hermes"] + ":/home/domen/.hermes")
+        return paths, binds
 
     def test_bwrap_injects_claude_plugin_only_for_claude(self):
         src = self._make_plugin("claude-ccc-containment")
@@ -422,6 +435,162 @@ class TestBwrapConfinement(unittest.TestCase):
         # no argv flags configured -> command is unchanged
         sep = argv.index("--")
         self.assertEqual(argv[sep + 1:], ["codex"])
+
+    def test_bwrap_shared_agent_state_dirs_are_rw_binds_by_default(self):
+        paths, binds = self._agent_state_binds()
+        src = self._make_plugin("codex-ccc-containment")
+        sandbox = "/home/domen/.codex/plugins/ccc-agent"
+        plugins = {"codex": {"src": src, "sandbox_path": sandbox,
+                             "ensure_dirs": ["/home/domen/.codex/plugins"],
+                             "argv": []}}
+
+        argv = self._capture_argv(["codex"], "codex", plugins,
+                                  agent_state_binds=binds)
+
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        self.assertIn(("--bind", paths["codex"], "/home/domen/.codex"), triples)
+        self.assertIn(("--bind", paths["claude"], "/home/domen/.claude"), triples)
+        self.assertIn(("--bind", paths["hermes"], "/home/domen/.hermes"), triples)
+        self.assertNotIn(("--ro-bind", paths["codex"], "/home/domen/.codex"), triples)
+
+        home_view = next(k for k in range(len(argv) - 2)
+                         if argv[k] == "--bind" and argv[k + 2] == "/home/domen")
+        codex_state = next(k for k in range(len(argv) - 2)
+                           if argv[k] == "--bind" and argv[k + 2] == "/home/domen/.codex")
+        plugin_bind = next(k for k in range(len(argv) - 2)
+                           if argv[k] == "--ro-bind" and argv[k + 2] == sandbox)
+        self.assertGreater(codex_state, home_view)
+        self.assertGreater(plugin_bind, codex_state)
+
+    def test_bwrap_protect_agent_state_omits_shared_agent_state_binds(self):
+        paths, binds = self._agent_state_binds()
+
+        argv = self._capture_argv(["true"], "command", {},
+                                  agent_state_binds=binds,
+                                  protect_agent_state=True)
+
+        self.assertNotIn(paths["codex"], argv)
+        self.assertNotIn(paths["claude"], argv)
+        self.assertNotIn(paths["hermes"], argv)
+
+    def test_shared_agent_state_skips_agent_home_policy_ignores(self):
+        _paths, binds = self._agent_state_binds()
+        src = self._make_plugin("codex-ccc-containment")
+        sandbox = "/home/domen/.codex/plugins/ccc-agent"
+        plugins = {"codex": {"src": src, "sandbox_path": sandbox,
+                             "ensure_dirs": ["/home/domen/.codex/plugins"],
+                             "argv": []}}
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self._bwrap_config(
+                ["codex"], agent_kind="codex", agent_plugins=plugins,
+                agent_state_binds=binds))
+
+        self.assertNotIn("/storage/user/.codex", session.policy["ignore_patterns"])
+        self.assertNotIn("/storage/user/.codex/plugins", session.policy["ignore_patterns"])
+
+    def test_protected_agent_state_ignores_only_codex_plugin_subpaths(self):
+        _paths, binds = self._agent_state_binds()
+        src = self._make_plugin("codex-ccc-containment")
+        sandbox = "/home/domen/.codex/plugins/ccc-agent"
+        plugins = {"codex": {"src": src, "sandbox_path": sandbox,
+                             "ensure_dirs": ["/home/domen/.codex/plugins"],
+                             "argv": []}}
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self._bwrap_config(
+                ["codex"], agent_kind="codex", agent_plugins=plugins,
+                agent_state_binds=binds, protect_agent_state=True))
+
+        self.assertNotIn("/storage/user/.codex", session.policy["ignore_patterns"])
+        self.assertIn("/storage/user/.codex/plugins", session.policy["ignore_patterns"])
+        self.assertIn("/storage/user/.codex/plugins/ccc-agent",
+                      session.policy["ignore_patterns"])
+
+    def test_bwrap_plugin_mount_paths_are_ignored_even_without_policy_default(self):
+        src = self._make_plugin("codex-ccc-containment")
+        sandbox = "/home/domen/.ccc-system/plugins/ccc-agent"
+        plugins = {"codex": {"src": src, "sandbox_path": sandbox,
+                             "ensure_dirs": ["/home/domen/.ccc-system/plugins"],
+                             "argv": []}}
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0)
+
+        def plugin_mountpoint_delta(session):
+            root = session.protected_roots["storage_user"]
+            path = os.path.join(root.mount, ".ccc-system", "plugins",
+                                "ccc-agent", "hooks.json")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("{}\n")
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self._bwrap_config(
+                ["codex"], agent_kind="codex", agent_plugins=plugins),
+                before_finalize=plugin_mountpoint_delta)
+
+        self.assertEqual(session.state, "aborted")
+        self.assertIn("/storage/user/.ccc-system", session.policy["ignore_patterns"])
+        self.assertFalse(os.path.exists(os.path.join(
+            self.h.base, ".ccc-system", "plugins", "ccc-agent", "hooks.json")))
+
+    def test_bwrap_ro_bind_destinations_under_home_are_ignored(self):
+        runtime = os.path.join(self._tmp.name, "runtime")
+        os.makedirs(runtime)
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0)
+
+        def mountpoint_delta(session):
+            root = session.protected_roots["storage_user"]
+            path = os.path.join(root.mount, ".ccc-runtime", "marker")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("mounted\n")
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self._bwrap_config(
+                ["true"], bwrap_ro_binds=[runtime + ":/home/domen/.ccc-runtime"]),
+                before_finalize=mountpoint_delta)
+
+        self.assertEqual(session.state, "aborted")
+        self.assertIn("/storage/user/.ccc-runtime",
+                      session.policy["ignore_patterns"])
+        self.assertFalse(os.path.exists(os.path.join(self.h.base,
+                                                     ".ccc-runtime", "marker")))
+
+    def test_missing_bwrap_ro_bind_source_does_not_ignore_destination(self):
+        missing = os.path.join(self._tmp.name, "missing-runtime")
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0)
+
+        def workspace_delta(session):
+            root = session.protected_roots["storage_user"]
+            path = os.path.join(root.mount, "Projects", "proj-a", "result.txt")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("agent work\n")
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self._bwrap_config(
+                ["true"],
+                bwrap_ro_binds=[missing + ":/home/domen/Projects/proj-a"]),
+                before_finalize=workspace_delta)
+
+        self.assertEqual(session.state, "auto-committed")
+        self.assertNotIn("/storage/user/Projects/proj-a",
+                         session.policy["ignore_patterns"])
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.h.base, "Projects", "proj-a", "result.txt")))
 
     def test_bwrap_auto_detects_plugin_from_absolute_executable_path(self):
         src = self._make_plugin("codex-ccc-containment")

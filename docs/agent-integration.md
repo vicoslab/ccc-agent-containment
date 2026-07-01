@@ -86,13 +86,20 @@ Disable all injection with `ccc-agent setup --no-agent-plugins` (alias
 
 ## Credentials and writable agent state
 
-`~/.codex` and `~/.claude` are **agent runtime state**, not trusted plugin
-storage. They must stay writable inside the sandbox because real agents create
-logs, session files, caches, lock files, and sometimes refreshed tokens there.
-Do not bind the whole directories read-only.
+`~/.codex`, `~/.claude`, and `~/.hermes` are **agent/system state**, not trusted
+plugin storage and not BranchFS-protected project data by default. `ccc-agent
+run` direct-binds the real shared directories read-write over the BranchFS home
+view so real agents can create logs, session files, caches, lock files, config,
+and refreshed tokens. Changes there persist immediately and Codex/Claude/Hermes
+own concurrent access across sessions and CCC nodes.
 
-Instead, system deployments protect the containment plugin by installing it
-outside `$HOME`:
+Use `ccc-agent run --protect-agent-state` or config `protect_agent_state: true`
+when a user explicitly wants those directories inside BranchFS review. In that
+mode ccc-agent will not try to understand or merge agent internals; the user must
+handle any conflicts, especially SQLite/state databases.
+
+System deployments protect the containment plugin by installing it outside
+`$HOME`:
 
 - package code, plugin manifests, and hook scripts live in a root-owned
   Python/package location under `/usr` (or another OS path exposed read-only by
@@ -103,16 +110,19 @@ outside `$HOME`:
   the hook source;
 - direct, uncontained `codex`/`claude`/`hermes` runs do not load CCC plugins.
 
-The writable `~/.codex` / `~/.claude` trees are visible through the BranchFS
-view. Their changes are matched by policy `ignore_patterns` and discarded unless
-a human explicitly reviews/commits them.
+The shared `~/.codex` / `~/.claude` / `~/.hermes` trees are outside BranchFS by
+default. They are mounted directly from the real home and are therefore not part
+of status, review, commit, or abort. The same ignored-runtime treatment still
+applies to common shell/REPL history and cache files that land in protected
+paths; startup/config files such as `~/.bashrc` remain reviewable deny matches,
+not ignored noise.
 
 `cred_mounts` remains available only for narrow special-case read-only overlays;
 do **not** use it for whole agent config/state directories. `cred_mask` and
 `cred_env` are for API-key deployments where an individual secret file can be
 masked and the supervisor can pass the key via env. OAuth-subscription logins
 (codex `auth.json` with `tokens`, claude `.credentials.json`) authenticate from
-files, so those files must remain readable through the BranchFS view.
+files, so those files must remain readable through the shared agent-state bind.
 
 ## Browsing / cleaning lingering sessions
 
@@ -133,6 +143,6 @@ Or directly via the BranchFS CLI (the branch name is the session id):
 ```bash
 branchfs list   --storage <store>
 branchfs status <session> --storage <store> --json
-branchfs commit-branch <session> --storage <store>   # apply deltas to base
+branchfs commit-branch <session> --storage <store>   # low-level: applies all deltas, bypasses ccc-agent ignores
 branchfs abort-branch  <session> --storage <store>   # discard the branch
 ```

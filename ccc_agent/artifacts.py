@@ -93,7 +93,9 @@ def render_summary(session, changes_by_root, decision):
     out("")
     out("```bash")
     out("ccc-agent show %s" % session.session_id)
-    out("ccc-agent diff %s" % session.session_id)
+    out("ccc-agent diff %s          # list changed paths" % session.session_id)
+    out("ccc-agent diff %s <path>   # unified diff for one text file" %
+        session.session_id)
     out("ccc-agent commit %s   # apply branch to real storage" %
         session.session_id)
     out("ccc-agent abort %s    # discard branch" % session.session_id)
