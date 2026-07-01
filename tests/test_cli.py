@@ -218,10 +218,14 @@ class TestMainRun(unittest.TestCase):
 
         self.assertEqual(code, 0)
         output = stderr.getvalue()
+        mount = os.path.join(self._tmp.name, "state", "agent-banner",
+                             "mounts", "storage_user")
         self.assertIn("dropped into new contained BranchFS environment", output)
         self.assertIn("session: agent-banner", output)
-        self.assertIn("backend data path: %s" % os.path.join(
-            self.h.base, self.h.workspace_rel), output)
+        self.assertIn("serving visible /storage/user from BranchFS view %s"
+                      % mount, output)
+        self.assertNotIn("visible workspace:", output)
+        self.assertNotIn("backend data path:", output)
 
     def test_agent_exit_code_propagates(self):
         code = main_run([

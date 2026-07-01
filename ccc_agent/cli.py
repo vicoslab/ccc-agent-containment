@@ -37,7 +37,7 @@ from .control import ControlError as ChannelError
 from .ctl import CHECK_REPAIR, Controller, ControlError
 from .paths import AliasMap
 from .runner import (ENV_CONTROL_SOCK, ENV_CONTROL_TOKEN, RootSpec,
-                     RunnerConfig, backend_workspace_path, run_session)
+                     RunnerConfig, run_session)
 from .session import SessionStore
 
 CONFIG_ENV = "CCC_AGENT_CONFIG"
@@ -152,12 +152,10 @@ def _write_session_start_banner(session, alias_map, confinement, stream=None):
         stream.write(
             "ccc-agent: dropped into new contained BranchFS environment\n")
     stream.write("ccc-agent: session: %s\n" % session.session_id)
-    stream.write("ccc-agent: visible workspace: %s\n" % session.workspace)
-    try:
-        backend_path = backend_workspace_path(session, alias_map)
-    except ValueError as exc:
-        backend_path = "unavailable (%s)" % exc
-    stream.write("ccc-agent: backend data path: %s\n" % backend_path)
+    for _name, root in sorted(session.protected_roots.items()):
+        stream.write(
+            "ccc-agent: serving visible %s from BranchFS view %s\n"
+            % (alias_map.canonicalize(root.visible), root.mount))
 
 
 def main_run(argv=None, env=None, prog="ccc-agent run"):

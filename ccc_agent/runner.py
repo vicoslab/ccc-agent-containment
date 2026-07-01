@@ -168,18 +168,6 @@ def _primary_root(session, alias_map):
                      % session.workspace)
 
 
-def backend_workspace_path(session, alias_map):
-    """Map the agent-visible workspace path to the real backend data path."""
-    workspace = alias_map.canonicalize(session.workspace)
-    for root in session.protected_roots.values():
-        visible = alias_map.canonicalize(root.visible)
-        if is_within(workspace, visible):
-            rel = os.path.relpath(workspace, visible)
-            return root.base if rel == "." else os.path.join(root.base, rel)
-    raise ValueError("workspace %s is not under any protected root"
-                     % session.workspace)
-
-
 # System paths exposed read-only inside the bwrap sandbox.  The agent sees the
 # OS read-only and its BranchFS view read-write, and nothing else (no real
 # underlay, no other /storage mounts, no daemon/docker sockets).  On merged-/usr
