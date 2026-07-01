@@ -171,8 +171,7 @@ and turn-boundary matrix.
 
 The branchfs binary and bwrap are separate (not pip-installable); in CCC images
 the runit startup installs them and runs the two commands above (see the CCC
-image repo's `06_ccc_agent.sh`). The legacy
-`install-ccc-agent-plugin.sh` remains as a hand-rolled user-level installer.
+image repo's `06_ccc_agent.sh`).
 
 ## Deployment
 
