@@ -37,7 +37,7 @@ from .control import ControlError as ChannelError
 from .ctl import CHECK_REPAIR, Controller, ControlError
 from .paths import AliasMap
 from .runner import (ENV_CONTROL_SOCK, ENV_CONTROL_TOKEN, RootSpec,
-                     RunnerConfig, run_session)
+                     RunnerConfig, backend_workspace_path, run_session)
 from .session import SessionStore
 
 CONFIG_ENV = "CCC_AGENT_CONFIG"
@@ -84,6 +84,25 @@ def build_runtime(config):
     if not roots:
         raise SystemExit("ccc-agent: config defines no protected roots")
     return store, backend, alias_map, user, roots
+
+
+def _write_session_start_banner(session, alias_map, confinement, stream=None):
+    """Print the human-facing handoff banner before the agent command starts."""
+    stream = sys.stderr if stream is None else stream
+    if confinement == "none":
+        stream.write(
+            "ccc-agent: started new BranchFS session "
+            "(confinement=none debug mode; not a security boundary)\n")
+    else:
+        stream.write(
+            "ccc-agent: dropped into new contained BranchFS environment\n")
+    stream.write("ccc-agent: session: %s\n" % session.session_id)
+    stream.write("ccc-agent: visible workspace: %s\n" % session.workspace)
+    try:
+        backend_path = backend_workspace_path(session, alias_map)
+    except ValueError as exc:
+        backend_path = "unavailable (%s)" % exc
+    stream.write("ccc-agent: backend data path: %s\n" % backend_path)
 
 
 def main_run(argv=None, env=None, prog="ccc-agent run"):
@@ -169,7 +188,9 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
         agent_state_binds=config.get("agent_state_binds"),
         protect_agent_state=(args.protect_agent_state or
                              bool(config.get("protect_agent_state", False))),
-        ensure_agent_state_dirs=bool(config.get("ensure_agent_state_dirs", False)))
+        ensure_agent_state_dirs=bool(config.get("ensure_agent_state_dirs", False)),
+        on_session_start=lambda session: _write_session_start_banner(
+            session, alias_map, confinement))
     session = run_session(runner_config, env=env)
 
     sys.stderr.write("ccc-agent: session %s finished: %s\n"

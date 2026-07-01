@@ -81,7 +81,7 @@ class RunnerConfig(object):
                  cred_mounts=(), cred_mask=(), cred_env=None,
                  bwrap_uid=None, bwrap_gid=None, agent_plugins=None,
                  agent_state_binds=None, protect_agent_state=False,
-                 ensure_agent_state_dirs=False):
+                 ensure_agent_state_dirs=False, on_session_start=None):
         self.store = store              # SessionStore
         self.backend = backend          # BranchfsCli or FakeBranchFS
         self.alias_map = alias_map
@@ -142,6 +142,7 @@ class RunnerConfig(object):
                                   else _default_agent_state_binds(owner))
         self.protect_agent_state = bool(protect_agent_state)
         self.ensure_agent_state_dirs = bool(ensure_agent_state_dirs)
+        self.on_session_start = on_session_start
 
 
 def _agent_cwd(session, alias_map):
@@ -163,6 +164,18 @@ def _primary_root(session, alias_map):
     for root in session.protected_roots.values():
         if is_within(workspace, alias_map.canonicalize(root.visible)):
             return root
+    raise ValueError("workspace %s is not under any protected root"
+                     % session.workspace)
+
+
+def backend_workspace_path(session, alias_map):
+    """Map the agent-visible workspace path to the real backend data path."""
+    workspace = alias_map.canonicalize(session.workspace)
+    for root in session.protected_roots.values():
+        visible = alias_map.canonicalize(root.visible)
+        if is_within(workspace, visible):
+            rel = os.path.relpath(workspace, visible)
+            return root.base if rel == "." else os.path.join(root.base, rel)
     raise ValueError("workspace %s is not under any protected root"
                      % session.workspace)
 
@@ -809,6 +822,8 @@ def run_session(config, env=None, before_finalize=None):
 
         session.transition("running")
         config.store.save(session)
+        if config.on_session_start is not None:
+            config.on_session_start(session)
         if config.confinement == "bwrap":
             # bwrap assembles the namespace itself and --chdir's into the
             # workspace inside the sandbox, so no host-side cwd is set here.

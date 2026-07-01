@@ -136,6 +136,48 @@ class TestMainRun(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(
             self.h.base, self.h.workspace_rel, "artifact.txt")))
 
+    def test_run_displays_containment_banner_at_session_start(self):
+        """A newly-created contained session should be obvious to the user."""
+        with open(self.h.config_path) as fh:
+            data = json.load(fh)
+        data["confinement"] = "bwrap"
+        with open(self.h.config_path, "w") as fh:
+            json.dump(data, fh)
+
+        def fake_run_session(config, env=None):
+            root = config.roots[0].materialize(
+                "agent-banner", config.store.state_dir,
+                mount_dir=config.store.mount_dir("agent-banner"))
+            session = SimpleNamespace(
+                session_id="agent-banner",
+                workspace="/storage/user/Projects/proj-a",
+                protected_roots={"storage_user": root},
+                state="auto-committed",
+                events=[],
+                exit_status=0,
+            )
+            callback = getattr(config, "on_session_start", None)
+            if callback is not None:
+                callback(session)
+            return session
+
+        stderr = io.StringIO()
+        with mock.patch("ccc_agent.cli.run_session", side_effect=fake_run_session):
+            with contextlib.redirect_stderr(stderr):
+                code = main_run([
+                    "--config", self.h.config_path,
+                    "--workspace", "/storage/user/Projects/proj-a",
+                    "--agent", "fake",
+                    "--", "true",
+                ], env={})
+
+        self.assertEqual(code, 0)
+        output = stderr.getvalue()
+        self.assertIn("dropped into new contained BranchFS environment", output)
+        self.assertIn("session: agent-banner", output)
+        self.assertIn("backend data path: %s" % os.path.join(
+            self.h.base, self.h.workspace_rel), output)
+
     def test_agent_exit_code_propagates(self):
         code = main_run([
             "--config", self.h.config_path,
