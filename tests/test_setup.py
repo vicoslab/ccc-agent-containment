@@ -35,16 +35,17 @@ class TestCondaShimActivation(unittest.TestCase):
 
     def test_conda_activation_hook_puts_shims_before_env_bin(self):
         config = os.path.join(self.tmp, "config.json")
-        rc = setup_mod.main([
-            "--user",
-            "--config", config,
-            "--state-dir", os.path.join(self.tmp, "state"),
-            "--no-hooks",
-            "--enable-shims",
-            "--link-dir", self.shimdir,
-            "--conda-prefix", self.conda,
-            "--conda-activate-shims",
-        ])
+        with mock.patch.dict(os.environ, {"HOME": self.home}, clear=False):
+            rc = setup_mod.main([
+                "--user",
+                "--config", config,
+                "--state-dir", os.path.join(self.tmp, "state"),
+                "--no-hooks",
+                "--enable-shims",
+                "--link-dir", self.shimdir,
+                "--conda-prefix", self.conda,
+                "--conda-activate-shims",
+            ])
         self.assertEqual(rc, 0)
         activate = os.path.join(
             self.conda, "etc", "conda", "activate.d", "ccc-agent-shims.sh")

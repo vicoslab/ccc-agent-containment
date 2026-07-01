@@ -210,6 +210,135 @@ class TestMainRun(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(
             self.h.base, self.h.workspace_rel, "artifact.txt")))
 
+    def test_pending_review_finish_line_shows_changes_and_diff(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = main_run([
+                "--config", self.h.config_path,
+                "--workspace", "/storage/user/Projects/proj-a",
+                "--policy", "manual",
+                "--agent", "fake",
+                "--", "sh", "-c", "printf 'hello\\n' > review.txt",
+            ], env={})
+
+        self.assertEqual(code, 0)
+        output = stderr.getvalue()
+        self.assertIn("finished: pending-review (1 change needs review)", output)
+        self.assertIn("Pending changes for", output)
+        self.assertIn("A /storage/user/Projects/proj-a/review.txt", output)
+        self.assertIn("--- a/Projects/proj-a/review.txt", output)
+        self.assertIn("+hello", output)
+        self.assertIn("then: ccc-agent commit", output)
+        self.assertNotIn("Accept changes?", output)
+
+    def test_pending_review_lists_all_paths_before_all_diffs(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = main_run([
+                "--config", self.h.config_path,
+                "--workspace", "/storage/user/Projects/proj-a",
+                "--policy", "manual",
+                "--agent", "fake",
+                "--", "sh", "-c",
+                "printf 'one\\n' > a.txt; "
+                "mkdir -p sub; printf 'two\\n' > sub/b.txt",
+            ], env={})
+
+        self.assertEqual(code, 0)
+        output = stderr.getvalue()
+        self.assertIn("finished: pending-review (2 changes need review)", output)
+        changed_start = output.index("Changed paths:")
+        diff_start = output.index("\nDiff:\n")
+        changed_section = output[changed_start:diff_start]
+        diff_section = output[diff_start:]
+        self.assertIn("A /storage/user/Projects/proj-a/a.txt", changed_section)
+        self.assertIn("A /storage/user/Projects/proj-a/sub/b.txt", changed_section)
+        self.assertNotIn("--- a/Projects/proj-a/a.txt", changed_section)
+        self.assertNotIn("--- a/Projects/proj-a/sub/b.txt", changed_section)
+        self.assertIn("--- a/Projects/proj-a/a.txt", diff_section)
+        self.assertIn("--- a/Projects/proj-a/sub/b.txt", diff_section)
+
+    def test_pending_review_quick_yes_commits(self):
+        stderr = io.StringIO()
+        with mock.patch("ccc_agent.cli._is_interactive_review", return_value=True):
+            with mock.patch("builtins.input", return_value="yes"):
+                with contextlib.redirect_stderr(stderr):
+                    code = main_run([
+                        "--config", self.h.config_path,
+                        "--workspace", "/storage/user/Projects/proj-a",
+                        "--policy", "manual",
+                        "--agent", "fake",
+                        "--", "sh", "-c", "echo out > artifact.txt",
+                    ], env={})
+
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.h.base, self.h.workspace_rel, "artifact.txt")))
+        sid = self.h.sessions()[0]
+        store = SessionStore(os.path.join(self.h.tmp, "state"))
+        self.assertEqual(store.load(sid).state, "committed")
+        self.assertIn("Accept changes?", stderr.getvalue())
+        self.assertIn("committed session", stderr.getvalue())
+
+    def test_pending_review_quick_no_discards(self):
+        stderr = io.StringIO()
+        with mock.patch("ccc_agent.cli._is_interactive_review", return_value=True):
+            with mock.patch("builtins.input", return_value="no"):
+                with contextlib.redirect_stderr(stderr):
+                    code = main_run([
+                        "--config", self.h.config_path,
+                        "--workspace", "/storage/user/Projects/proj-a",
+                        "--policy", "manual",
+                        "--agent", "fake",
+                        "--", "sh", "-c", "echo out > artifact.txt",
+                    ], env={})
+
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.h.base, self.h.workspace_rel, "artifact.txt")))
+        sid = self.h.sessions()[0]
+        store = SessionStore(os.path.join(self.h.tmp, "state"))
+        self.assertEqual(store.load(sid).state, "aborted")
+        self.assertIn("discarded session", stderr.getvalue())
+
+    def test_pending_review_quick_later_keeps_review(self):
+        stderr = io.StringIO()
+        with mock.patch("ccc_agent.cli._is_interactive_review", return_value=True):
+            with mock.patch("builtins.input", return_value="later"):
+                with contextlib.redirect_stderr(stderr):
+                    code = main_run([
+                        "--config", self.h.config_path,
+                        "--workspace", "/storage/user/Projects/proj-a",
+                        "--policy", "manual",
+                        "--agent", "fake",
+                        "--", "sh", "-c", "echo out > artifact.txt",
+                    ], env={})
+
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.h.base, self.h.workspace_rel, "artifact.txt")))
+        sid = self.h.sessions()[0]
+        store = SessionStore(os.path.join(self.h.tmp, "state"))
+        self.assertEqual(store.load(sid).state, "pending-review")
+        self.assertIn("kept for later review", stderr.getvalue())
+
+    def test_large_pending_review_text_uses_less(self):
+        class TtyBuffer(io.StringIO):
+            def isatty(self):
+                return True
+
+        stream = TtyBuffer()
+        with mock.patch("ccc_agent.cli._terminal_lines", return_value=2):
+            with mock.patch("ccc_agent.cli.shutil.which", return_value="less"):
+                with mock.patch("ccc_agent.cli.subprocess.run") as run:
+                    getattr(cli_mod, "_display_or_page")(
+                        "one\ntwo\nthree\n", stream=stream)
+
+        run.assert_called_once()
+        self.assertEqual(run.call_args[0][0], ["less", "-R"])
+        self.assertEqual(run.call_args[1]["input"], "one\ntwo\nthree\n")
+        self.assertIn("opening change review in less", stream.getvalue())
+
     def test_run_displays_containment_banner_at_session_start(self):
         """A newly-created contained session should be obvious to the user."""
         with open(self.h.config_path) as fh:
@@ -407,6 +536,86 @@ class TestMainCtl(unittest.TestCase):
         self.assertEqual(
             main_ctl(["--config", self.h.config_path, "commit",
                       "agent-missing"], env={}), 1)
+
+
+class TestShellCompletion(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.h = CliHarness(self._tmp.name)
+        self._make_session("agent-alpha")
+        self._make_session("agent-beta")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _make_session(self, session_id):
+        store = SessionStore(os.path.join(self.h.tmp, "state"))
+        root = ProtectedRoot(
+            name="storage_user", base=self.h.base,
+            store=os.path.join(self.h.tmp, "stores", "storage_user"),
+            branch=session_id,
+            mount=os.path.join(self.h.tmp, "mounts", session_id),
+            visible="/storage/user", home_subdir="")
+        return store.create(
+            owner="domen", agent_kind="codex", agent_command=["codex"],
+            workspace="/storage/user/Projects/proj-a",
+            policy={"mode": "manual"}, protected_roots={"storage_user": root},
+            session_id=session_id)
+
+    def complete(self, words, cword=None, env=None):
+        if cword is None:
+            cword = len(words) - 1
+        out = io.StringIO()
+        env = {"CCC_AGENT_CONFIG": self.h.config_path} if env is None else env
+        with contextlib.redirect_stdout(out):
+            code = main(["__complete", "bash", str(cword)] + list(words),
+                        env=env)
+        self.assertEqual(code, 0)
+        return out.getvalue().splitlines()
+
+    def test_session_id_ops_complete_session_ids(self):
+        ops = (list(getattr(cli_mod, "_SESSION_ID_CTL_OPS"))
+               + ["diff", "review", "list"])
+        for op in ops:
+            with self.subTest(op=op):
+                self.assertEqual(
+                    self.complete(["ccc-agent", op, "agent-a"]),
+                    ["agent-alpha"])
+
+    def test_session_completion_uses_config_flag_after_op(self):
+        self.assertEqual(
+            self.complete(["ccc-agent", "show", "--config", self.h.config_path,
+                           "agent-b"]),
+            ["agent-beta"])
+
+    def test_session_completion_stops_after_session_positional(self):
+        self.assertEqual(
+            self.complete(["ccc-agent", "diff", "agent-alpha", ""]),
+            [])
+
+    def test_list_accepts_completed_session_prefix(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["--config", self.h.config_path, "list", "agent-a"],
+                        env={})
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("agent-alpha", text)
+        self.assertNotIn("agent-beta", text)
+
+    def test_top_level_completion_lists_matching_ops(self):
+        matches = self.complete(["ccc-agent", "st"])
+        self.assertIn("status", matches)
+
+    def test_public_completion_command_prints_bash_hook(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["completion", "bash"], env={})
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("ccc-agent __complete bash", text)
+        self.assertIn("complete -o default -F _ccc_agent_complete ccc-agent",
+                      text)
 
 
 class TestUnifiedMain(unittest.TestCase):

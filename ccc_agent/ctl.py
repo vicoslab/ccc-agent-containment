@@ -49,9 +49,15 @@ class Controller(object):
                    ", ".join(allowed)))
 
     # -- read-only ----------------------------------------------------------
-    def list(self, out=None):
+    def list(self, session_prefix=None, out=None):
+        if out is None and hasattr(session_prefix, "write"):
+            out = session_prefix
+            session_prefix = None
         out = out or sys.stdout
         sessions = self.store.list()
+        if session_prefix:
+            sessions = [session for session in sessions
+                        if session.session_id.startswith(session_prefix)]
         out.write("%-42s %-16s %-14s %s\n"
                   % ("SESSION", "STATE", "AGENT", "CREATED"))
         for session in sessions:

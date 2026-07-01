@@ -163,6 +163,27 @@ python3 -m pip install --user "git+https://github.com/vicoslab/ccc-agent.git"
 ccc-agent setup --user
 ```
 
+### Shell completion
+
+`pip install ccc-agent` installs shell completion files into standard
+`share/...` locations, so bash/fish/zsh can pick them up the same way Git
+completions are picked up by package installs:
+
+- `share/bash-completion/completions/ccc-agent`
+- `share/zsh/site-functions/_ccc-agent`
+- `share/fish/vendor_completions.d/ccc-agent.fish`
+
+With `pip install --user`, those land under the user base (normally
+`~/.local/share/...`). With the system install command above, they land under the
+system Python prefix. Start a new shell after install; no `source <(...)` step is
+part of normal setup. `ccc-agent completion <bash|zsh|fish>` remains available
+only as a debug / one-off fallback.
+
+The completion hook reads the configured session store and completes optional
+`session-id` prefixes for `list`, plus required `session-id` arguments for
+`show`, `status`, `diff`, `review`, `commit`, `abort`, `thaw`, `finish`,
+`finish-turn`, and `check-before-final`.
+
 `ccc-agent setup` does what pip can't: writes `config.json` with the
 `agent_plugins` map, makes the bundled plugin hook scripts executable, and
 optionally installs the transparent PATH shims (`--enable-shims`). It does

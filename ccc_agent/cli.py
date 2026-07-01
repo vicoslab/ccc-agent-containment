@@ -23,8 +23,10 @@ Search order: --config flag, $CCC_AGENT_CONFIG, /etc/ccc-agent/config.json,
 
 import argparse
 import getpass
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 from importlib import resources
@@ -158,16 +160,22 @@ def _write_session_start_banner(session, alias_map, confinement, stream=None):
             % (alias_map.canonicalize(root.visible), root.mount))
 
 
-def _auto_commit_finish_detail(store, session):
-    """Return the short parenthesized result for an auto-committed session."""
-    if session.state != "auto-committed":
-        return ""
+def _review_total_changes(store, session):
     path = os.path.join(store.review_dir(session.session_id),
                         "policy-decision.json")
     try:
         with open(path) as fh:
-            total = int(json.load(fh).get("total_changes", 0))
+            return int(json.load(fh).get("total_changes", 0))
     except (OSError, ValueError, TypeError):
+        return None
+
+
+def _auto_commit_finish_detail(store, session):
+    """Return the short parenthesized result for an auto-committed session."""
+    if session.state != "auto-committed":
+        return ""
+    total = _review_total_changes(store, session)
+    if total is None:
         return ""
     if total == 0:
         return " (no changes)"
@@ -175,8 +183,110 @@ def _auto_commit_finish_detail(store, session):
     return " (%d %s in workspace)" % (total, noun)
 
 
+def _pending_review_finish_detail(store, session):
+    if session.state != "pending-review":
+        return ""
+    total = _review_total_changes(store, session)
+    if total is None:
+        return ""
+    noun = "change" if total == 1 else "changes"
+    verb = "needs" if total == 1 else "need"
+    return " (%d %s %s review)" % (total, noun, verb)
+
+
 def _finish_state_label(store, session):
-    return session.state + _auto_commit_finish_detail(store, session)
+    return (session.state + _auto_commit_finish_detail(store, session)
+            + _pending_review_finish_detail(store, session))
+
+
+def _terminal_lines():
+    return shutil.get_terminal_size((80, 24)).lines
+
+
+def _display_or_page(text, stream=None):
+    stream = sys.stderr if stream is None else stream
+    text = text if text.endswith("\n") else text + "\n"
+    too_tall = len(text.splitlines()) > max(1, _terminal_lines() - 4)
+    if getattr(stream, "isatty", lambda: False)() and too_tall and shutil.which("less"):
+        stream.write(
+            "ccc-agent: opening change review in less "
+            "(use Up/Down to browse, q to close)\n")
+        stream.flush()
+        subprocess.run(["less", "-R"], input=text, text=True)
+    else:
+        stream.write(text)
+
+
+def _pending_review_text(controller, session):
+    changed = io.StringIO()
+    controller.diff(session.session_id, out=changed)
+    patch = io.StringIO()
+    try:
+        controller.review(session.session_id, emit_patch=True, out=patch)
+    except ControlError as exc:
+        patch.write("(diff unavailable: %s)\n" % exc)
+
+    lines = [
+        "ccc-agent: Pending changes for %s" % session.session_id,
+        "",
+        "Changed paths:",
+        changed.getvalue().rstrip() or "(none)",
+        "",
+        "Diff:",
+        patch.getvalue().rstrip() or "(no textual diff)",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _is_interactive_review():
+    return sys.stdin.isatty() and sys.stderr.isatty()
+
+
+def _prompt_pending_review_decision(controller, session, stream=None):
+    stream = sys.stderr if stream is None else stream
+    while True:
+        stream.write(
+            "ccc-agent: Accept changes? "
+            "yes=commit / no=discard / later=keep for review [later]: ")
+        stream.flush()
+        try:
+            choice = input().strip().lower()
+        except EOFError:
+            choice = "later"
+        if choice in ("y", "yes"):
+            updated = controller.commit(session.session_id)
+            stream.write("ccc-agent: committed session %s\n"
+                         % updated.session_id)
+            return updated
+        if choice in ("n", "no"):
+            updated = controller.abort(session.session_id)
+            stream.write("ccc-agent: discarded session %s\n"
+                         % updated.session_id)
+            return updated
+        if choice in ("", "l", "later", "r", "review"):
+            stream.write("ccc-agent: kept for later review: %s\n"
+                         % session.session_id)
+            return session
+        stream.write("ccc-agent: please answer yes, no, or later.\n")
+
+
+def _handle_pending_review_finish(store, backend, alias_map, session, stream=None):
+    if session.state != "pending-review":
+        return session
+    stream = sys.stderr if stream is None else stream
+    controller = Controller(store=store, backend=backend, alias_map=alias_map)
+    try:
+        _display_or_page(_pending_review_text(controller, session), stream=stream)
+    except ControlError as exc:
+        stream.write("ccc-agent: could not show pending changes: %s\n" % exc)
+    if _is_interactive_review():
+        try:
+            return _prompt_pending_review_decision(controller, session,
+                                                   stream=stream)
+        except ControlError as exc:
+            stream.write("ccc-agent: review decision failed: %s\n" % exc)
+    return session
 
 
 def main_run(argv=None, env=None, prog="ccc-agent run"):
@@ -297,6 +407,10 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
             % (store.session_file(session.session_id), session.session_id))
 
     if session.state == "pending-review":
+        session = _handle_pending_review_finish(store, backend, alias_map,
+                                                session)
+
+    if session.state == "pending-review":
         sys.stderr.write(
             "ccc-agent: review with: ccc-agent diff %s\n"
             "ccc-agent: file diff: ccc-agent diff %s <path>\n"
@@ -370,6 +484,16 @@ def _ctl_socket(args, env):
     return 0
 
 
+_SESSION_ID_CTL_OPS = (
+    "show", "status", "commit", "abort", "thaw", "finish",
+    "finish-turn", "check-before-final",
+)
+
+
+def _add_session_id_arg(parser):
+    parser.add_argument("session_id", metavar="session-id")
+
+
 def main_ctl(argv=None, env=None, prog="ccc-agent"):
     argv = list(sys.argv[1:] if argv is None else argv)
     # Accept both ``ccc-agent --config X list`` (argparse's natural shape) and
@@ -385,16 +509,17 @@ def main_ctl(argv=None, env=None, prog="ccc-agent"):
         description="Inspect and control BranchFS agent sessions.")
     parser.add_argument("--config", help="path to config.json")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list")
-    for name in ("show", "status", "commit", "abort", "thaw",
-                 "finish", "finish-turn", "check-before-final"):
+    lp = sub.add_parser("list")
+    lp.add_argument("session_id", nargs="?", metavar="session-id-prefix",
+                    help="optional session id prefix filter")
+    for name in _SESSION_ID_CTL_OPS:
         p = sub.add_parser(name)
-        p.add_argument("session_id")
+        _add_session_id_arg(p)
     dp = sub.add_parser("diff", help="show changed paths, or a unified diff for one file")
-    dp.add_argument("session_id")
+    _add_session_id_arg(dp)
     dp.add_argument("path", nargs="?", help="optional changed file to diff")
     rv = sub.add_parser("review", help="post-session change review")
-    rv.add_argument("session_id")
+    _add_session_id_arg(rv)
     rv.add_argument("--accept", action="store_true", help="commit everything")
     rv.add_argument("--reject", action="store_true",
                     help="discard everything (revert)")
@@ -427,7 +552,7 @@ def main_ctl(argv=None, env=None, prog="ccc-agent"):
 
     try:
         if args.cmd == "list":
-            controller.list()
+            controller.list(getattr(args, "session_id", None))
         elif args.cmd == "show":
             controller.show(args.session_id)
         elif args.cmd == "status":
@@ -485,11 +610,200 @@ def main_softsandbox(argv=None, env=None):
         return subprocess.call(["bash", str(script)] + argv, env=env)
 
 
-_CTL_OPS = {
-    "list", "show", "status", "diff", "commit", "abort", "thaw", "finish",
-    "finish-turn", "check-before-final", "review", "finalize-turn",
-    "approve-turn",
+_CTL_OPS = (set(_SESSION_ID_CTL_OPS) | {
+    "list", "diff", "review", "finalize-turn", "approve-turn",
+})
+_SESSION_ID_COMPLETION_OPS = (
+    set(_SESSION_ID_CTL_OPS) | {"diff", "review", "list"}
+)
+_MAIN_OPS = tuple(sorted(_CTL_OPS | {
+    "run", "launch", "setup", "softsandbox", "completion",
+}))
+_TOP_LEVEL_OPTIONS = ("--config", "--version", "--help")
+_GLOBAL_VALUE_OPTIONS = frozenset(("--config",))
+_REVIEW_VALUE_OPTIONS = frozenset(("--commit", "--apply-patch"))
+_REVIEW_OPTIONS = (
+    "--accept", "--reject", "--commit", "--emit-patch", "--apply-patch",
+    "--config", "--help",
+)
+
+
+_COMPLETION_SCRIPTS = {
+    "bash": ("assets", "completions", "bash", "ccc-agent"),
+    "zsh": ("assets", "completions", "zsh", "_ccc-agent"),
+    "fish": ("assets", "completions", "fish", "ccc-agent.fish"),
 }
+
+
+def _completion_script(shell):
+    try:
+        parts = _COMPLETION_SCRIPTS[shell]
+    except KeyError:
+        raise SystemExit("ccc-agent: unknown completion shell %r" % shell)
+    ref = resources.files("ccc_agent")
+    for part in parts:
+        ref = ref.joinpath(part)
+    return ref.read_text()
+
+
+def _matching(candidates, prefix):
+    return [item for item in sorted(candidates) if item.startswith(prefix)]
+
+
+def _normalize_completion_words(words, cword):
+    words = list(words)
+    if cword < 0:
+        cword = 0
+    while len(words) <= cword:
+        words.append("")
+    if words and os.path.basename(words[0]) == "ccc-agent":
+        words = words[1:]
+        cword -= 1
+        if cword < 0:
+            cword = 0
+        while len(words) <= cword:
+            words.append("")
+    return words, cword
+
+
+def _first_completion_command_index(tokens):
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "":
+            return i
+        if token == "--config":
+            i += 2
+            continue
+        if token.startswith("--config="):
+            i += 1
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        return i
+    return None
+
+
+def _completion_config_path(tokens, cword):
+    config_path = None
+    for i, token in enumerate(tokens):
+        if token == "--config" and i + 1 < len(tokens):
+            if i + 1 != cword and tokens[i + 1]:
+                config_path = tokens[i + 1]
+        elif token.startswith("--config="):
+            value = token.split("=", 1)[1]
+            if value:
+                config_path = value
+    return config_path
+
+
+def _value_options_for_completion(op):
+    values = set()
+    values.update(_GLOBAL_VALUE_OPTIONS)
+    if op == "review":
+        values.update(_REVIEW_VALUE_OPTIONS)
+    return values
+
+
+def _positionals_before_completion_token(tokens, cmd_idx, cword, op):
+    value_options = _value_options_for_completion(op)
+    positionals = []
+    i = cmd_idx + 1
+    while i < len(tokens) and i < cword:
+        token = tokens[i]
+        if token in value_options:
+            if i + 1 == cword:
+                return positionals, True
+            i += 2
+            continue
+        if any(token.startswith(opt + "=") for opt in value_options):
+            i += 1
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        positionals.append(token)
+        i += 1
+    return positionals, False
+
+
+def _options_for_completion(op):
+    if op == "review":
+        return _REVIEW_OPTIONS
+    if op in _CTL_OPS or op in ("run", "launch", "setup", "softsandbox",
+                                "completion"):
+        return ("--config", "--help")
+    return _TOP_LEVEL_OPTIONS
+
+
+def _session_id_completions(prefix, config_path=None, env=None):
+    env = os.environ if env is None else env
+    try:
+        config = load_config(config_path, env=env)
+    except (SystemExit, OSError, ValueError):
+        return []
+    state_dir = config.get("state_dir") or os.path.join(
+        os.path.expanduser("~"), ".ccc-agent")
+    try:
+        sessions = SessionStore(state_dir).list()
+    except (OSError, ValueError):
+        return []
+    return sorted(session.session_id for session in sessions
+                  if session.session_id.startswith(prefix))
+
+
+def _complete_words(words, cword, env=None):
+    tokens, cword = _normalize_completion_words(words, cword)
+    prefix = tokens[cword] if 0 <= cword < len(tokens) else ""
+    cmd_idx = _first_completion_command_index(tokens)
+
+    if cmd_idx is None or cword <= cmd_idx:
+        if prefix.startswith("-"):
+            return _matching(_TOP_LEVEL_OPTIONS, prefix)
+        return _matching(_MAIN_OPS, prefix)
+
+    op = tokens[cmd_idx]
+    if prefix.startswith("-"):
+        return _matching(_options_for_completion(op), prefix)
+
+    positionals, current_is_option_value = _positionals_before_completion_token(
+        tokens, cmd_idx, cword, op)
+    if current_is_option_value:
+        return []
+    if op in _SESSION_ID_COMPLETION_OPS and not positionals:
+        return _session_id_completions(
+            prefix, config_path=_completion_config_path(tokens, cword), env=env)
+    return []
+
+
+def main_complete(argv=None, env=None):
+    """Hidden entrypoint used by shell completion functions."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in _COMPLETION_SCRIPTS:
+        argv = argv[1:]
+    if not argv:
+        return 0
+    try:
+        cword = int(argv[0])
+    except ValueError:
+        return 0
+    for candidate in _complete_words(argv[1:], cword, env=env):
+        sys.stdout.write(candidate + "\n")
+    return 0
+
+
+def main_completion(argv=None, prog="ccc-agent completion"):
+    """Print shell completion code for ccc-agent."""
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        description="Print a shell completion script for ccc-agent.")
+    parser.add_argument("shell", nargs="?", default="bash",
+                        choices=sorted(_COMPLETION_SCRIPTS),
+                        help="shell to generate for (default: bash)")
+    args = parser.parse_args(argv)
+    sys.stdout.write(_completion_script(args.shell))
+    return 0
 
 
 def _print_main_help(stream=None):
@@ -503,6 +817,7 @@ def _print_main_help(stream=None):
         "  run              run a command, or the current shell when omitted, "
         "in a contained BranchFS session\n"
         "  setup            write config, plugin entries, and optional shims\n"
+        "  completion       print shell completion code (bash, zsh, fish)\n"
         "  softsandbox      diagnostic non-FUSE soft sandbox helper\n\n"
         "Session/control ops:\n"
         "  list, show, status, diff, review, commit, abort, thaw, finish\n"
@@ -525,6 +840,10 @@ def main(argv=None, env=None):
         return 0
 
     op, rest = argv[0], argv[1:]
+    if op == "__complete":
+        return main_complete(rest, env=env)
+    if op == "completion":
+        return main_completion(rest, prog="ccc-agent completion")
     if op in ("run", "launch"):
         return main_run(rest, env=env, prog="ccc-agent %s" % op)
     if op == "setup":

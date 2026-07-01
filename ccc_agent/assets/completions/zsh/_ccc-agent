@@ -1,0 +1,12 @@
+#compdef ccc-agent
+# zsh completion for ccc-agent. Installed by pip into site-functions.
+_ccc_agent_complete() {
+    local -a completions
+    completions=("${(@f)$(ccc-agent __complete zsh "$((CURRENT - 1))" "${words[@]}" 2>/dev/null)}")
+    if (( ${#completions} )); then
+        compadd -- "${completions[@]}"
+    else
+        _files
+    fi
+}
+_ccc_agent_complete "$@"

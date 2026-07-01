@@ -28,6 +28,9 @@ version = { attr = "ccc_agent.__version__" }
     "assets/hooks/*.sh",
     "assets/shims/*.sh",
     "assets/scripts/*.sh",
+    "assets/completions/bash/ccc-agent",
+    "assets/completions/zsh/_ccc-agent",
+    "assets/completions/fish/ccc-agent.fish",
     "assets/plugins/**/*.json",
     "assets/plugins/claude-ccc-containment/.claude-plugin/*.json",
     "assets/plugins/codex-ccc-containment/.codex-plugin/*.json",
@@ -35,3 +38,8 @@ version = { attr = "ccc_agent.__version__" }
     "assets/plugins/**/*.yaml",
     "assets/plugins/**/*.py",
 ]
+
+[tool.setuptools.data-files]
+"share/bash-completion/completions" = ["ccc_agent/assets/completions/bash/ccc-agent"]
+"share/zsh/site-functions" = ["ccc_agent/assets/completions/zsh/_ccc-agent"]
+"share/fish/vendor_completions.d" = ["ccc_agent/assets/completions/fish/ccc-agent.fish"]
