@@ -131,6 +131,23 @@ class TestRunSession(unittest.TestCase):
         self.assertIn(session.session_id, summary)
         self.assertIn("ccc-agent commit", summary)
 
+    def test_mounts_and_reviews_live_under_session_bundle(self):
+        session = run_session(self.h.config(
+            ["sh", "-c", "echo x > ../../outside.txt"]))
+        bundle = os.path.join(self.h.state_dir, session.session_id)
+        root = session.protected_roots["storage_user"]
+
+        self.assertEqual(root.mount,
+                         os.path.join(bundle, "mounts", "storage_user"))
+        self.assertEqual(self.h.store.review_dir(session.session_id),
+                         os.path.join(bundle, "reviews"))
+        self.assertTrue(os.path.isfile(os.path.join(bundle, "session",
+                                                    "session.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.h.state_dir,
+                                                     "mounts")))
+        self.assertFalse(os.path.exists(os.path.join(self.h.state_dir,
+                                                     "reviews")))
+
     def test_mount_failure_marks_session_failed(self):
         class FailingMount(FakeBranchFS):
             def mount(self, root, agent=True):
@@ -468,6 +485,11 @@ class TestBwrapConfinement(unittest.TestCase):
                if argv[k] == "--setenv"}
         self.assertEqual(env.get("CCC_AGENT_CONTROL_SOCK"), sock)
         self.assertTrue(env.get("CCC_AGENT_CONTROL_TOKEN"))
+        expected_host_sock = os.path.join(self.h.state_dir, session.session_id,
+                                          "control", "control.sock")
+        control_events = [e for e in session.events
+                          if e.get("event") == "control-server"]
+        self.assertEqual(control_events[-1].get("detail"), expected_host_sock)
         # everything is before the -- command separator
         sep = argv.index("--")
         self.assertEqual(argv[sep + 1:], ["my-agent"])

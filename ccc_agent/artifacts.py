@@ -1,7 +1,7 @@
 """Durable review artifacts for completed/frozen sessions.
 
 Everything a human needs to decide commit-vs-abort lands under
-``<state>/reviews/<session-id>/`` so sessions can be inspected long after the
+``<state>/<session-id>/reviews/`` so sessions can be inspected long after the
 agent (and even the node it ran on) is gone.
 """
 

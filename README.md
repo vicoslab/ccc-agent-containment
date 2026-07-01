@@ -76,7 +76,12 @@ branchfs abort-branch  <session> --storage <store>   # discard the branch
 ```
 
 Durable review artifacts (summary.md, per-root status JSON, policy decision)
-land under `<state_dir>/reviews/<session-id>/`.
+land under `<state_dir>/<session-id>/reviews/`. Other non-store runtime data
+for the same run is bundled nearby, e.g.
+`<state_dir>/<session-id>/session/session.json`,
+`<state_dir>/<session-id>/mounts/`, and
+`<state_dir>/<session-id>/control/control.sock`. BranchFS stores/deltas stay at
+the configured root `store` paths.
 
 ### Credentials
 

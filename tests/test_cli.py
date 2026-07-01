@@ -37,10 +37,8 @@ class CliHarness(object):
             }, fh)
 
     def sessions(self):
-        sessions_dir = os.path.join(self.tmp, "state", "sessions")
-        if not os.path.isdir(sessions_dir):
-            return []
-        return sorted(os.listdir(sessions_dir))
+        store = SessionStore(os.path.join(self.tmp, "state"))
+        return sorted(s.session_id for s in store.list())
 
 
 class TestLoadConfig(unittest.TestCase):

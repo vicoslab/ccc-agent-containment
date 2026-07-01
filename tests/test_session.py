@@ -139,11 +139,27 @@ class TestStore(unittest.TestCase):
         leftovers = [n for n in os.listdir(session_dir) if n.endswith(".tmp")]
         self.assertEqual(leftovers, [])
 
-    def test_review_dir_layout(self):
+    def test_per_session_bundle_layout(self):
         session = make_session(self.store)
-        review = self.store.review_dir(session.session_id)
-        self.assertTrue(review.startswith(self.tmp.name))
-        self.assertIn(session.session_id, review)
+        bundle = os.path.join(self.tmp.name, session.session_id)
+
+        self.assertEqual(self.store.session_dir(session.session_id),
+                         os.path.join(bundle, "session"))
+        self.assertEqual(self.store.session_file(session.session_id),
+                         os.path.join(bundle, "session", "session.json"))
+        self.assertEqual(self.store.review_dir(session.session_id),
+                         os.path.join(bundle, "reviews"))
+        self.assertEqual(self.store.mount_dir(session.session_id),
+                         os.path.join(bundle, "mounts"))
+        self.assertEqual(self.store.control_dir(session.session_id),
+                         os.path.join(bundle, "control"))
+        self.assertEqual(self.store.control_socket(session.session_id),
+                         os.path.join(bundle, "control", "control.sock"))
+
+        # New sessions should not recreate the old type-first top-level layout.
+        for old_top in ("sessions", "reviews", "mounts", "control"):
+            self.assertFalse(os.path.exists(os.path.join(self.tmp.name,
+                                                         old_top)))
 
 
 if __name__ == "__main__":

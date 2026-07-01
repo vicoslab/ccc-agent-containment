@@ -25,8 +25,10 @@ inspect, commit, or abort them. This holds because:
 2. the BranchFS store (deltas, tombstones, metadata, `daemon.sock`) lives
    outside the agent view — commit requests are only accepted over that
    socket;
-3. session state (`<state_dir>/sessions`, `reviews`) is outside the view and
-   additionally covered by the `.ccc-agent` deny pattern;
+3. session state (`<state_dir>/<session-id>/session`), review artifacts,
+   mountpoints, and per-turn control sockets are grouped under one
+   `<state_dir>/<session-id>/` bundle outside the view and additionally covered
+   by the `.ccc-agent` deny pattern;
 4. hooks invoke `ccc-agent finish-turn` (records an event) and
    `ccc-agent check-before-final` (reads live status; exit 2 asks the
    agent to revert policy violations, bounded by
@@ -113,8 +115,9 @@ branchfs (unprivileged, in-container)
 
 The sidecar stays policy-free. Path translation between the container and
 sidecar namespaces is the sidecar's Docker-inspect mode (see that repo's
-README); BranchFS mountpoints under `/__branchfs_mounts/...` must resolve to
-the same host paths in both namespaces or be translated.
+README); BranchFS mountpoints under the per-session
+`<state_dir>/<session-id>/mounts/...` bundle must resolve to the same host paths
+in both namespaces or be translated.
 
 ## Runtime validation
 

@@ -177,8 +177,10 @@ class SessionStore(object):
 
     Layout::
 
-        <state_dir>/sessions/<session-id>/session.json
-        <state_dir>/reviews/<session-id>/...
+        <state_dir>/<session-id>/session/session.json
+        <state_dir>/<session-id>/reviews/...
+        <state_dir>/<session-id>/mounts/...
+        <state_dir>/<session-id>/control/control.sock
 
     The state dir should live on storage that the *agent cannot see* from
     inside its sandbox (it is covered by the default ``.ccc-agent`` deny
@@ -187,18 +189,33 @@ class SessionStore(object):
 
     def __init__(self, state_dir):
         self.state_dir = os.path.abspath(state_dir)
-        self.sessions_dir = os.path.join(self.state_dir, "sessions")
-        self.reviews_dir = os.path.join(self.state_dir, "reviews")
 
     # -- paths ------------------------------------------------------------
+    def bundle_dir(self, session_id):
+        """Top-level directory containing all non-store data for a session."""
+        return os.path.join(self.state_dir, session_id)
+
     def session_dir(self, session_id):
-        return os.path.join(self.sessions_dir, session_id)
+        return os.path.join(self.bundle_dir(session_id), "session")
 
     def session_file(self, session_id):
         return os.path.join(self.session_dir(session_id), "session.json")
 
     def review_dir(self, session_id):
-        return os.path.join(self.reviews_dir, session_id)
+        return os.path.join(self.bundle_dir(session_id), "reviews")
+
+    def mount_dir(self, session_id):
+        return os.path.join(self.bundle_dir(session_id), "mounts")
+
+    def control_dir(self, session_id):
+        return os.path.join(self.bundle_dir(session_id), "control")
+
+    def control_socket(self, session_id):
+        return os.path.join(self.control_dir(session_id), "control.sock")
+
+    def _legacy_session_file(self, session_id):
+        return os.path.join(self.state_dir, "sessions", session_id,
+                            "session.json")
 
     # -- lifecycle ---------------------------------------------------------
     def create(self, owner, agent_kind, agent_command, workspace, policy,
@@ -232,17 +249,35 @@ class SessionStore(object):
     def load(self, session_id):
         path = self.session_file(session_id)
         if not os.path.isfile(path):
+            legacy = self._legacy_session_file(session_id)
+            if os.path.isfile(legacy):
+                path = legacy
+        if not os.path.isfile(path):
             raise KeyError("no such session: %s" % (session_id,))
         with open(path) as fh:
             return Session.from_dict(json.load(fh))
 
     def list(self):
-        if not os.path.isdir(self.sessions_dir):
+        if not os.path.isdir(self.state_dir):
             return []
         sessions = []
-        for name in sorted(os.listdir(self.sessions_dir)):
+        seen = set()
+        for name in sorted(os.listdir(self.state_dir)):
+            if name in ("sessions", "reviews", "mounts", "control"):
+                continue
             try:
-                sessions.append(self.load(name))
+                session = self.load(name)
+                sessions.append(session)
+                seen.add(session.session_id)
             except (KeyError, ValueError):
                 continue  # skip corrupt/foreign entries, never crash listing
+        legacy_sessions = os.path.join(self.state_dir, "sessions")
+        if os.path.isdir(legacy_sessions):
+            for name in sorted(os.listdir(legacy_sessions)):
+                if name in seen:
+                    continue
+                try:
+                    sessions.append(self.load(name))
+                except (KeyError, ValueError):
+                    continue
         return sessions

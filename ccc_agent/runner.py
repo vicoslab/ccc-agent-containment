@@ -50,12 +50,13 @@ class RootSpec(object):
         self.store = store
         self.visible = visible
         self.home_subdir = home_subdir
-        self.mount = mount  # default: <state>/mounts/<session>/<name>
+        self.mount = mount  # default: <state>/<session>/mounts/<name>
         self.hide_paths = list(hide_paths)
 
-    def materialize(self, session_id, state_dir):
-        mount = self.mount or os.path.join(state_dir, "mounts", session_id,
-                                           self.name)
+    def materialize(self, session_id, state_dir, mount_dir=None):
+        root_mount_dir = mount_dir or os.path.join(state_dir, session_id,
+                                                   "mounts")
+        mount = self.mount or os.path.join(root_mount_dir, self.name)
         return ProtectedRoot(name=self.name, base=self.base, store=self.store,
                              branch=session_id, mount=mount,
                              visible=self.visible,
@@ -560,8 +561,11 @@ def run_session(config, env=None, before_finalize=None):
         completion=config.completion,
     )
     session.protected_roots = {
-        spec.name: spec.materialize(session.session_id,
-                                    config.store.state_dir)
+        spec.name: spec.materialize(
+            session.session_id,
+            config.store.state_dir,
+            mount_dir=config.store.mount_dir(session.session_id),
+        )
         for spec in config.roots
     }
     # If an operator configured optional read-only credential overlays under
@@ -606,8 +610,7 @@ def run_session(config, env=None, before_finalize=None):
         control = None
         if config.per_turn:
             token = binascii.hexlify(os.urandom(16)).decode("ascii")
-            host_sock = os.path.join(config.store.state_dir, "control",
-                                     session.session_id + ".sock")
+            host_sock = config.store.control_socket(session.session_id)
             turn_ctl = TurnController(session, config.store, config.backend,
                                       config.alias_map)
             control_server = ControlServer(host_sock, turn_ctl.handle, token)
