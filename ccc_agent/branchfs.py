@@ -25,6 +25,32 @@ class BranchfsError(Exception):
     pass
 
 
+def _branch_dir(root):
+    return os.path.join(root.store, "branches", root.branch)
+
+
+def _remove_empty_orphan_branch_dir(root):
+    """Remove a branch directory left behind by a partial abort, if empty.
+
+    Real BranchFS can get into this shape when `abort-branch` is attempted
+    while a branch is still mounted: the daemon forgets the branch, but NFS
+    silly-renamed files or structural directories can keep the store path from
+    being removed.  Treat an absent/empty orphan as already aborted, but do not
+    discard real files here because that would hide a more serious cleanup
+    failure from the operator.
+    """
+    path = _branch_dir(root)
+    if not os.path.exists(path):
+        return True
+    if not os.path.isdir(path):
+        return False
+    for _dirpath, _dirnames, filenames in os.walk(path):
+        if filenames:
+            return False
+    shutil.rmtree(path)
+    return True
+
+
 def _format_timeout_seconds(value):
     return "%gs" % float(value)
 
@@ -167,7 +193,15 @@ class BranchfsCli(object):
 
     def abort(self, root):
         self.start_daemon(root)
-        self._invoke("abort-branch", root.branch, "--storage", root.store)
+        try:
+            self._invoke("abort-branch", root.branch, "--storage", root.store)
+        except BranchfsError as exc:
+            # Idempotent recovery for the observed partial-abort state: the
+            # branch registry is already gone, and only an empty store skeleton
+            # remains after the stale mount has been unmounted.
+            if "branch not found" in str(exc) and _remove_empty_orphan_branch_dir(root):
+                return
+            raise
 
 
 class FakeBranchFS(object):

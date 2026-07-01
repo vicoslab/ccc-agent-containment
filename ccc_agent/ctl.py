@@ -48,6 +48,46 @@ class Controller(object):
                 % (action, session.session_id, session.state,
                    ", ".join(allowed)))
 
+    def _mount_still_active(self, root):
+        try:
+            return os.path.ismount(root.mount)
+        except OSError:
+            return False
+
+    def _discard_branch(self, session, name, root, action, strict=True):
+        """Unmount a root, then discard its branch delta.
+
+        BranchFS can leave NFS `.nfs*` files and half-aborted branch metadata if
+        `abort-branch` is called while the FUSE view is still mounted.  Always
+        quiesce the mount first.  For operator `abort`, failures are strict and
+        keep the session non-terminal; for post-commit cleanup, the base has
+        already been updated, so cleanup failures are recorded as warnings.
+        """
+        try:
+            self.backend.unmount(root)
+            session.add_event("unmounted-root", name)
+        except Exception as exc:
+            detail = "%s could not unmount root %s at %s: %s" % (
+                action, name, root.mount, exc)
+            if self._mount_still_active(root):
+                session.add_event("error", detail)
+                self.store.save(session)
+                if strict:
+                    raise ControlError(detail)
+                return False
+            session.add_event("unmount-skipped", detail)
+        try:
+            self.backend.abort(root)
+        except Exception as exc:
+            detail = "%s could not discard branch %s for root %s: %s" % (
+                action, root.branch, name, exc)
+            session.add_event("error" if strict else "discard-warning", detail)
+            self.store.save(session)
+            if strict:
+                raise ControlError(detail)
+            return False
+        return True
+
     # -- read-only ----------------------------------------------------------
     def list(self, session_prefix=None, out=None):
         if out is None and hasattr(session_prefix, "write"):
@@ -192,14 +232,8 @@ class Controller(object):
             self.store.save(session)
             raise ControlError("commit failed, branch preserved: %s" % exc)
         for name, root in sorted(session.protected_roots.items()):
-            try:
-                self.backend.abort(root)
-            except Exception:
-                pass
-            try:
-                self.backend.unmount(root)
-            except Exception:
-                pass
+            self._discard_branch(session, name, root, "commit cleanup",
+                                 strict=False)
             session.add_event("committed-root", name)
         session.transition("committed")
         self.store.save(session)
@@ -211,12 +245,8 @@ class Controller(object):
             raise ControlError("session %s already %s"
                                % (session_id, session.state))
         for name, root in sorted(session.protected_roots.items()):
-            self.backend.abort(root)
+            self._discard_branch(session, name, root, "abort", strict=True)
             session.add_event("aborted-root", name)
-            try:
-                self.backend.unmount(root)
-            except Exception:
-                pass
         session.transition("aborted")
         self.store.save(session)
         return session
@@ -329,14 +359,8 @@ class Controller(object):
         """After a selective/patch apply to base, discard the branch deltas and
         mark the session committed."""
         for name, root in sorted(session.protected_roots.items()):
-            try:
-                self.backend.abort(root)
-            except Exception:
-                pass
-            try:
-                self.backend.unmount(root)
-            except Exception:
-                pass
+            self._discard_branch(session, name, root, "selective cleanup",
+                                 strict=False)
             session.add_event("selective-commit", "%s: %s" % (name, detail))
         session.transition("committed")
         self.store.save(session)

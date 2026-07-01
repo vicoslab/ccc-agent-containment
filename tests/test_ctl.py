@@ -166,6 +166,38 @@ class TestController(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.h.base,
                                                      "outside.txt")))
 
+    def test_abort_unmounts_running_session_before_discarding_branch(self):
+        # Real BranchFS can fail abort-branch with ENOTEMPTY/.nfs leftovers if
+        # the branch is still mounted.  Operator abort must quiesce the FUSE
+        # view before discarding the delta.
+        class MountedAbortFails(FakeBranchFS):
+            def __init__(self):
+                super(MountedAbortFails, self).__init__()
+                self.calls = []
+
+            def unmount(self, root):
+                self.calls.append("unmount")
+                super(MountedAbortFails, self).unmount(root)
+
+            def abort(self, root):
+                self.calls.append("abort")
+                if root.mount in self._mounted:
+                    raise RuntimeError("Directory not empty (os error 39)")
+                super(MountedAbortFails, self).abort(root)
+
+        self.h.backend = MountedAbortFails()
+        session, root = self.h.running_session(branch="agent-running-abort")
+        with open(os.path.join(root.mount, "junk.txt"), "w") as fh:
+            fh.write("discard me\n")
+
+        self.h.controller().abort(session.session_id)
+
+        reloaded = self.h.store.load(session.session_id)
+        self.assertEqual(reloaded.state, "aborted")
+        self.assertEqual(self.h.backend.calls[-2:], ["unmount", "abort"])
+        self.assertFalse(os.path.exists(os.path.join(self.h.base,
+                                                     "junk.txt")))
+
     def test_commit_terminal_session_rejected(self):
         session = self.h.run_agent(["sh", "-c", "echo ok > fine.txt"])
         self.assertEqual(session.state, "auto-committed")

@@ -194,6 +194,73 @@ class TestBranchfsCli(unittest.TestCase):
         self.assertEqual(subcommands, ["start-daemon", "commit-branch",
                                        "start-daemon", "abort-branch"])
 
+    def test_abort_treats_missing_branch_with_no_store_dir_as_idempotent(self):
+        class MissingBranchRunner(object):
+            def __init__(self, branch):
+                self.calls = []
+                self.branch = branch
+
+            def __call__(self, argv):
+                self.calls.append(list(argv))
+                if argv[1] == "abort-branch":
+                    return 1, "", "Error: branch not found: %s" % self.branch
+                return 0, "", ""
+
+        runner = MissingBranchRunner(self.root.branch)
+        cli = BranchfsCli(run=runner)
+
+        cli.abort(self.root)
+
+        self.assertEqual([c[1] for c in runner.calls],
+                         ["start-daemon", "abort-branch"])
+
+    def test_abort_removes_empty_orphan_branch_dir_after_missing_branch(self):
+        class MissingBranchRunner(object):
+            def __init__(self, branch):
+                self.calls = []
+                self.branch = branch
+
+            def __call__(self, argv):
+                self.calls.append(list(argv))
+                if argv[1] == "abort-branch":
+                    return 1, "", "Error: branch not found: %s" % self.branch
+                return 0, "", ""
+
+        branch_dir = os.path.join(self.root.store, "branches", self.root.branch)
+        os.makedirs(os.path.join(branch_dir, "files", "user"), exist_ok=True)
+        os.makedirs(os.path.join(branch_dir, "inherited"), exist_ok=True)
+        runner = MissingBranchRunner(self.root.branch)
+        cli = BranchfsCli(run=runner)
+
+        cli.abort(self.root)
+
+        self.assertFalse(os.path.exists(branch_dir))
+
+    def test_abort_preserves_non_empty_orphan_branch_dir(self):
+        class MissingBranchRunner(object):
+            def __init__(self, branch):
+                self.calls = []
+                self.branch = branch
+
+            def __call__(self, argv):
+                self.calls.append(list(argv))
+                if argv[1] == "abort-branch":
+                    return 1, "", "Error: branch not found: %s" % self.branch
+                return 0, "", ""
+
+        branch_dir = os.path.join(self.root.store, "branches", self.root.branch)
+        os.makedirs(os.path.join(branch_dir, "files"), exist_ok=True)
+        payload = os.path.join(branch_dir, "files", "still-open.txt")
+        with open(payload, "w") as fh:
+            fh.write("leftover\n")
+        runner = MissingBranchRunner(self.root.branch)
+        cli = BranchfsCli(run=runner)
+
+        with self.assertRaises(BranchfsError):
+            cli.abort(self.root)
+
+        self.assertTrue(os.path.isfile(payload))
+
 
 class TestFakeBranchFS(unittest.TestCase):
     """The fake must be behaviorally close enough to drive the runner."""
