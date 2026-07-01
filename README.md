@@ -28,6 +28,9 @@ ccc-agent run --workspace /home/$USER/Projects/foo \
               --policy workspace-auto \
               --agent codex \
               -- codex exec "implement feature X"
+
+# omit the command to open the invoking shell (bash/sh/zsh/...) inside containment
+ccc-agent run --workspace /home/$USER/Projects/foo
 ```
 
 Outcome per policy:
@@ -118,7 +121,7 @@ remain readable through the shared agent-state bind.
 
 | Piece | Role |
 |---|---|
-| `bin/ccc-agent` / `ccc-agent run` | trusted launcher: session + branch bundle + agent + finalize; also used by transparent shims (workspace = `$PWD`) |
+| `bin/ccc-agent` / `ccc-agent run` | trusted launcher: session + branch bundle + agent/shell + finalize; also used by transparent shims (workspace = `$PWD`) |
 | `ccc-agent list/show/diff/...` | operator + in-sandbox control ops: list/show/diff/commit/abort/review/finalize-turn/approve-turn |
 | `ccc-agent setup` | installer/wiring op: config, plugin entries, optional transparent PATH shims |
 | `ccc_agent/` | stdlib-only Python: session store, policy engine, BranchFS driver, bwrap assembler, control socket + per-turn handler |

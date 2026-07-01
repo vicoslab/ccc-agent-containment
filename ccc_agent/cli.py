@@ -43,6 +43,61 @@ from .session import SessionStore
 CONFIG_ENV = "CCC_AGENT_CONFIG"
 CONFIG_PATHS = ("/etc/ccc-agent/config.json",
                 "/opt/ccc-agent/config/config.json")
+_KNOWN_SHELL_NAMES = frozenset((
+    "sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "pdksh",
+    "tcsh", "csh",
+))
+
+
+def _is_shell_argv0(value):
+    name = os.path.basename(str(value or "")).lstrip("-")
+    return name in _KNOWN_SHELL_NAMES
+
+
+def _parent_shell_command():
+    """Best-effort command for the shell that invoked ccc-agent.
+
+    `$SHELL` is often the user's login shell, not necessarily the shell they are
+    currently typing in (for example a temporary `sh` inside `zsh`).  On Linux,
+    the direct parent process is the most faithful signal for an interactive
+    `ccc-agent run`, so prefer /proc/<ppid>/cmdline when it looks like a shell.
+    """
+    proc = "/proc/%s" % os.getppid()
+    argv0 = None
+    try:
+        with open(os.path.join(proc, "cmdline"), "rb") as fh:
+            parts = fh.read().split(b"\0")
+        if parts and parts[0]:
+            argv0 = parts[0].decode("utf-8", "surrogateescape")
+    except OSError:
+        argv0 = None
+
+    if argv0 and _is_shell_argv0(argv0):
+        # Preserve explicit spellings like /bin/sh, but strip login-shell
+        # prefixes such as "-bash" because they are argv[0] decorations, not
+        # executable names.
+        base = os.path.basename(argv0)
+        if base.startswith("-"):
+            return [base.lstrip("-")]
+        return [argv0]
+
+    try:
+        exe = os.readlink(os.path.join(proc, "exe"))
+    except OSError:
+        exe = None
+    if exe and _is_shell_argv0(exe):
+        return [exe]
+    return None
+
+
+def _current_shell_command(env=None):
+    env = os.environ if env is None else env
+    parent = _parent_shell_command()
+    if parent:
+        return parent
+    if env.get("SHELL"):
+        return [env["SHELL"]]
+    return ["/bin/sh"]
 
 
 def load_config(path=None, env=None):
@@ -129,14 +184,14 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
                         help="print the full session event log (always shows "
                              "the error detail on failure)")
     parser.add_argument("command", nargs=argparse.REMAINDER,
-                        help="-- command to run")
+                        help="-- command to run (default: current shell)")
     args = parser.parse_args(argv)
 
     command = list(args.command)
     if command and command[0] == "--":
         command = command[1:]
     if not command:
-        parser.error("no agent command given (use: %s ... -- cmd)" % prog)
+        command = _current_shell_command(env=env)
 
     config = load_config(args.config, env=env)
     store, backend, alias_map, user, roots = build_runtime(config)
@@ -425,7 +480,8 @@ def _print_main_help(stream=None):
         "Global options:\n"
         "  --version        print the ccc-agent release version\n\n"
         "Primary ops:\n"
-        "  run              run a command in a contained BranchFS session\n"
+        "  run              run a command, or the current shell when omitted, "
+        "in a contained BranchFS session\n"
         "  setup            write config, plugin entries, and optional shims\n"
         "  softsandbox      diagnostic non-FUSE soft sandbox helper\n\n"
         "Session/control ops:\n"

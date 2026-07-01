@@ -9,6 +9,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from ccc_agent import cli as cli_mod
 from ccc_agent.cli import load_config, main, main_ctl, main_run
 from ccc_agent.session import ProtectedRoot, SessionStore
 
@@ -63,6 +64,50 @@ class TestLoadConfig(unittest.TestCase):
     def test_missing_config_exits(self):
         with self.assertRaises(SystemExit):
             load_config(env={})
+
+
+class TestShellDefault(unittest.TestCase):
+    def test_default_shell_prefers_current_parent_over_login_shell_env(self):
+        with mock.patch("ccc_agent.cli._parent_shell_command",
+                        return_value=["sh"]):
+            self.assertEqual(
+                getattr(cli_mod, "_current_shell_command")(
+                    {"SHELL": "/bin/zsh"}),
+                ["sh"])
+
+    def test_default_shell_falls_back_to_shell_env(self):
+        with mock.patch("ccc_agent.cli._parent_shell_command",
+                        return_value=None):
+            self.assertEqual(
+                getattr(cli_mod, "_current_shell_command")(
+                    {"SHELL": "/bin/zsh"}),
+                ["/bin/zsh"])
+
+    def test_default_shell_falls_back_to_bin_sh(self):
+        with mock.patch("ccc_agent.cli._parent_shell_command",
+                        return_value=None):
+            self.assertEqual(getattr(cli_mod, "_current_shell_command")({}),
+                             ["/bin/sh"])
+
+    def test_parent_shell_preserves_sh_cmdline_spelling(self):
+        def fake_open(path, mode="rb"):
+            self.assertEqual(path, "/proc/123/cmdline")
+            self.assertEqual(mode, "rb")
+            return io.BytesIO(b"sh\0")
+
+        with mock.patch("ccc_agent.cli.os.getppid", return_value=123):
+            with mock.patch("builtins.open", side_effect=fake_open):
+                self.assertEqual(getattr(cli_mod, "_parent_shell_command")(),
+                                 ["sh"])
+
+    def test_parent_shell_strips_login_shell_prefix(self):
+        def fake_open(path, mode="rb"):
+            return io.BytesIO(b"-zsh\0")
+
+        with mock.patch("ccc_agent.cli.os.getppid", return_value=123):
+            with mock.patch("builtins.open", side_effect=fake_open):
+                self.assertEqual(getattr(cli_mod, "_parent_shell_command")(),
+                                 ["zsh"])
 
 
 class TestMainRun(unittest.TestCase):
@@ -186,9 +231,23 @@ class TestMainRun(unittest.TestCase):
         ], env={})
         self.assertEqual(code, 7)
 
-    def test_missing_command_errors(self):
-        with self.assertRaises(SystemExit):
-            main_run(["--config", self.h.config_path, "--"], env={})
+    def test_run_without_command_defaults_to_current_shell(self):
+        seen = {}
+
+        def fake_run_session(config, env=None):
+            seen["config"] = config
+            return SimpleNamespace(session_id="agent-shell", state="auto-committed",
+                                   events=[], exit_status=0)
+
+        with mock.patch("ccc_agent.cli.run_session",
+                        side_effect=fake_run_session):
+            with mock.patch("ccc_agent.cli._parent_shell_command",
+                            return_value=["/bin/zsh"]):
+                code = main_run(["--config", self.h.config_path, "--"],
+                                env={"SHELL": "/bin/bash"})
+
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["config"].agent_command, ["/bin/zsh"])
 
     def test_agent_option_sets_explicit_agent_kind(self):
         seen = {}
