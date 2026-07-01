@@ -684,8 +684,8 @@ def finalize_session(session, store, backend, alias_map):
     if decision.decision == NO_CHANGES:
         for root in session.protected_roots.values():
             backend.abort(root)
-        session.add_event("closed", "no changes (no-op); branch aborted")
-        session.transition("aborted")
+        session.add_event("closed", "no changes (no-op); branch discarded")
+        session.transition("auto-committed")
     elif decision.decision == ABORT:
         for root in session.protected_roots.values():
             backend.abort(root)

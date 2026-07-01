@@ -170,6 +170,7 @@ class TestEvaluate(unittest.TestCase):
             Change(op="M", path="/storage/user/.claude/settings.json"),
             Change(op="M", path="/storage/user/.hermes/config.yaml"),
             Change(op="M", path="/storage/user/.bash_history"),
+            Change(op="D", path="/storage/user/domen-cuda10/.bash_history-00002.tmp"),
             Change(op="M", path="/storage/user/.python_history"),
             Change(op="A", path=f"{WORKSPACE}/ok.py"),
         ]

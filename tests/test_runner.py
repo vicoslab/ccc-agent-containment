@@ -90,9 +90,25 @@ class TestRunSession(unittest.TestCase):
 
     def test_noop_run_closes_cleanly(self):
         session = run_session(self.h.config(["true"]))
-        self.assertEqual(session.state, "aborted")
+        self.assertEqual(session.state, "auto-committed")
         self.assertTrue(any("no changes" in (e.get("detail") or "")
                             for e in session.events))
+
+    def test_shell_history_temp_noise_is_discarded_as_no_change(self):
+        session = run_session(
+            self.h.config(["sh", "-c", "true"]),
+            before_finalize=lambda s: self.h.backend.record_delete(
+                s.protected_roots["storage_user"],
+                "domen-cuda10/.bash_history-00002.tmp"))
+
+        self.assertEqual(session.state, "auto-committed")
+        review_status = os.path.join(
+            self.h.store.review_dir(session.session_id),
+            "status.storage_user.json")
+        with open(review_status) as fh:
+            self.assertEqual(json.load(fh), [])
+        root = session.protected_roots["storage_user"]
+        self.assertEqual(self.h.backend.status(root), [])
 
     def test_throwaway_mode_aborts_even_clean_writes(self):
         session = run_session(self.h.config(
@@ -554,7 +570,7 @@ class TestBwrapConfinement(unittest.TestCase):
                 ["codex"], agent_kind="codex", agent_plugins=plugins),
                 before_finalize=plugin_mountpoint_delta)
 
-        self.assertEqual(session.state, "aborted")
+        self.assertEqual(session.state, "auto-committed")
         self.assertIn("/storage/user/.ccc-system", session.policy["ignore_patterns"])
         self.assertFalse(os.path.exists(os.path.join(
             self.h.base, ".ccc-system", "plugins", "ccc-agent", "hooks.json")))
@@ -578,7 +594,7 @@ class TestBwrapConfinement(unittest.TestCase):
                 ["true"], bwrap_ro_binds=[runtime + ":/home/domen/.ccc-runtime"]),
                 before_finalize=mountpoint_delta)
 
-        self.assertEqual(session.state, "aborted")
+        self.assertEqual(session.state, "auto-committed")
         self.assertIn("/storage/user/.ccc-runtime",
                       session.policy["ignore_patterns"])
         self.assertFalse(os.path.exists(os.path.join(self.h.base,

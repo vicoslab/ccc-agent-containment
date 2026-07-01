@@ -29,14 +29,36 @@ def _run_subprocess(argv):
 
 def _changes_from_status(data, root):
     """Map a `branchfs status --json` document to Change objects in the
-    agent-visible namespace."""
+    agent-visible namespace.
+
+    BranchFS stores ordinary parent directories in the delta tree so nested
+    files have somewhere to live.  Older BranchFS status output exposed those
+    directories as separate 0-byte changes.  They are structural, not authored
+    changes, so the ccc-agent review surface keeps only leaf paths (files,
+    symlinks, tombstones, and standalone directory entries with no changed
+    descendants).
+    """
+    entries = list(data.get("diff", ()))
+    relpaths = [e.get("path", "").lstrip("/") for e in entries]
+
+    def has_changed_descendant(relpath):
+        prefix = relpath.rstrip("/") + "/"
+        return any(other != relpath and other.startswith(prefix)
+                   for other in relpaths)
+
     changes = []
-    for entry in data.get("diff", ()):
-        relpath = entry.get("path", "")
-        visible = root.visible.rstrip("/") + "/" + relpath.lstrip("/")
-        op = "D" if entry.get("op") == "delete" else "M"
-        changes.append(Change(op=op, path=visible,
-                              kind=entry.get("kind", "file"),
+    for entry in entries:
+        relpath = entry.get("path", "").lstrip("/")
+        kind = entry.get("kind", "file")
+        if kind == "dir" and has_changed_descendant(relpath):
+            continue
+        visible = root.visible.rstrip("/") + "/" + relpath
+        if entry.get("op") == "delete":
+            op = "D"
+        else:
+            base_path = os.path.join(root.base, relpath)
+            op = "M" if os.path.lexists(base_path) else "A"
+        changes.append(Change(op=op, path=visible, kind=kind,
                               bytes=entry.get("bytes", 0), root=root.name))
     return changes
 

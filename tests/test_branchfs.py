@@ -28,13 +28,19 @@ STATUS_JSON = {
     "state": "frozen",
     "parent_version_at_fork": 0,
     "commit_count": 0,
-    "delta_entries": 2,
+    "delta_entries": 4,
     "tombstones": 1,
     "diff": [
         {"op": "delta", "path": "Projects/proj-a/new.py", "kind": "file",
          "bytes": 12},
+        {"op": "delta", "path": "Projects/proj-a/existing.py", "kind": "file",
+         "bytes": 21},
+        # Older BranchFS versions emitted structural parent directories.  The
+        # ccc-agent review surface must still hide those and show only leaves.
         {"op": "delta", "path": "Projects/proj-a/sub", "kind": "dir",
          "bytes": 0},
+        {"op": "delta", "path": "Projects/proj-a/sub/leaf.txt", "kind": "file",
+         "bytes": 8},
         {"op": "delete", "path": "Projects/proj-a/old.txt",
          "kind": "tombstone", "bytes": 0},
     ],
@@ -131,18 +137,28 @@ class TestBranchfsCli(unittest.TestCase):
         self.assertNotIn("--allow-other", runner.calls[-1])
 
     def test_status_parses_changes_into_visible_namespace(self):
+        os.makedirs(os.path.join(self.root.base, "Projects", "proj-a"),
+                    exist_ok=True)
+        with open(os.path.join(self.root.base, "Projects", "proj-a",
+                               "existing.py"), "w") as fh:
+            fh.write("old contents\n")
         runner = RecordingRunner(outputs={"status": json.dumps(STATUS_JSON)})
         cli = BranchfsCli(run=runner)
         changes = cli.status(self.root)
         self.assertIn("--json", runner.calls[-1])
         by_path = {c.path: c for c in changes}
         added = by_path["/storage/user/Projects/proj-a/new.py"]
-        self.assertEqual(added.op, "M")
+        self.assertEqual(added.op, "A")
         self.assertEqual(added.kind, "file")
         self.assertEqual(added.bytes, 12)
         self.assertEqual(added.root, "storage_user")
+        modified = by_path["/storage/user/Projects/proj-a/existing.py"]
+        self.assertEqual(modified.op, "M")
         deleted = by_path["/storage/user/Projects/proj-a/old.txt"]
         self.assertEqual(deleted.op, "D")
+        leaf = by_path["/storage/user/Projects/proj-a/sub/leaf.txt"]
+        self.assertEqual(leaf.op, "A")
+        self.assertNotIn("/storage/user/Projects/proj-a/sub", by_path)
 
     def test_failure_raises_with_stderr(self):
         runner = RecordingRunner(fail_on={"freeze"})
@@ -193,7 +209,7 @@ class TestFakeBranchFS(unittest.TestCase):
         self.fake.record_delete(self.root, "existing.txt")
         changes = self.fake.status(self.root)
         ops = {c.path: c.op for c in changes}
-        self.assertEqual(ops["/storage/user/Projects/p/a.py"], "M")
+        self.assertEqual(ops["/storage/user/Projects/p/a.py"], "A")
         self.assertEqual(ops["/storage/user/existing.txt"], "D")
 
     def test_freeze_blocks_status_free_write_simulation(self):

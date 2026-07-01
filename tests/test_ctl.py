@@ -100,6 +100,21 @@ class TestController(unittest.TestCase):
         self.h.controller().diff(session.session_id, out=out)
         self.assertIn("/storage/user/outside.txt", out.getvalue())
 
+    def test_diff_with_empty_review_status_does_not_fallback_to_live_branch(self):
+        session = self.h.run_agent(["true"])
+        self.assertEqual(session.state, "auto-committed")
+
+        class StatusWouldBeWrong(FakeBranchFS):
+            def status(self, root):
+                raise AssertionError("diff should use the empty stored review")
+
+        controller = ctl.Controller(store=self.h.store,
+                                    backend=StatusWouldBeWrong(),
+                                    alias_map=self.h.alias_map)
+        out = io.StringIO()
+        controller.diff(session.session_id, out=out)
+        self.assertEqual(out.getvalue(), "")
+
     def test_diff_path_prints_unified_base_delta_diff(self):
         base_path = os.path.join(self.h.base, "Projects", "proj-a",
                                  "notes.txt")

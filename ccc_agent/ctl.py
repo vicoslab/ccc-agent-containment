@@ -87,10 +87,12 @@ class Controller(object):
             return self._diff_path(session, path, out)
         review = self.store.review_dir(session_id)
         wrote = False
+        saw_status = False
         if os.path.isdir(review):
             for name in sorted(os.listdir(review)):
                 if not (name.startswith("status.") and name.endswith(".json")):
                     continue
+                saw_status = True
                 with open(os.path.join(review, name)) as fh:
                     for entry in json.load(fh):
                         out.write("%s %s (%s, %d bytes)\n"
@@ -98,6 +100,8 @@ class Controller(object):
                                      entry.get("kind", "file"),
                                      entry.get("bytes", 0)))
                         wrote = True
+        if saw_status:
+            return session
         if not wrote:
             return self.status(session_id, out=out)
         return session
