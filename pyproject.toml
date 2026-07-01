@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccc-agent"
-version = "0.1.0"
+dynamic = ["version"]
 description = "BranchFS-based filesystem containment for AI agents in CCC containers"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -19,6 +19,9 @@ ccc-agent = "ccc_agent.cli:main"
 [tool.setuptools]
 packages = ["ccc_agent"]
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "ccc_agent.__version__" }
 
 [tool.setuptools.package-data]
 "ccc_agent" = [

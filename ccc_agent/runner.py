@@ -21,7 +21,7 @@ import subprocess
 
 from . import artifacts
 from .control import ControlServer
-from .paths import is_within
+from .paths import is_within, normalize
 from .policy import (ABORT, AUTO_COMMIT, NO_CHANGES, PENDING_REVIEW,
                      PolicyConfig, evaluate, filter_ignored)
 from .session import ProtectedRoot
@@ -221,6 +221,30 @@ def _optional_ro_bind(entry):
     else:
         dest = resolved_src
 
+    return (resolved_src, dest)
+
+
+def _optional_rw_dir_bind(entry):
+    """Return a safe optional read-write directory bind, or None to skip it.
+
+    Shared agent state dirs are mounted after the BranchFS home/storage view.
+    Like read-only optional binds, a destination such as ``~/.claude`` can be a
+    symlink to a storage path.  Passing the symlink itself to bwrap lets bwrap
+    resolve it inside the new root, after /home and /storage have been overlaid,
+    which can fail with ENOENT.  Resolve destination symlinks on the trusted host
+    first and bind onto the real target path instead.
+    """
+    src, dest = _bind_parts(entry)
+    if not src or not dest or not src.startswith("/") or not dest.startswith("/"):
+        return None
+    resolved_src = os.path.realpath(src)
+    if not os.path.isdir(resolved_src):
+        return None
+    resolved_dest = os.path.realpath(dest)
+    if os.path.normpath(resolved_dest) != os.path.normpath(dest):
+        if not os.path.exists(resolved_dest):
+            return None
+        dest = resolved_dest
     return (resolved_src, dest)
 
 
@@ -424,12 +448,9 @@ def _append_shared_agent_state_binds(argv, config):
     if config.protect_agent_state:
         return
     for entry in config.agent_state_binds:
-        src, dest = _bind_parts(entry)
-        if not src or not dest or not src.startswith("/") or not dest.startswith("/"):
-            continue
-        src = os.path.realpath(src)
-        if os.path.isdir(src):
-            argv += ["--bind", src, dest]
+        bind = _optional_rw_dir_bind(entry)
+        if bind is not None:
+            argv += ["--bind", bind[0], bind[1]]
 
 
 def _bwrap_command(session, config, control=None):
@@ -444,7 +465,11 @@ def _bwrap_command(session, config, control=None):
     """
     alias_map = config.alias_map
     primary = _primary_root(session, alias_map)
-    workdir = alias_map.canonicalize(session.workspace)
+    # Use the workspace path the user launched from as the in-sandbox cwd.
+    # Policy/root selection still canonicalizes aliases, but the process should
+    # start in `/home/domen/...` when invoked there rather than surprising the
+    # user with the equivalent `/storage/user/<container>/...` spelling.
+    workdir = normalize(session.workspace)
     home = "/home/%s" % config.owner
 
     # Map to the REAL uid inside the namespace (not 0): the view files are owned

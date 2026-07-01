@@ -280,9 +280,10 @@ class TestBwrapConfinement(unittest.TestCase):
         # the view is bound rw at its visible path and at $HOME
         self.assertIn("/storage/user", argv)
         self.assertIn("/home/domen", argv)
-        # workspace is the sandbox cwd via --chdir
+        # workspace is the sandbox cwd via --chdir; keep the user-visible alias
+        # from the launch directory instead of canonicalizing to /storage.
         ci = argv.index("--chdir")
-        self.assertEqual(argv[ci + 1], "/storage/user/Projects/proj-a")
+        self.assertEqual(argv[ci + 1], "/home/domen/Projects/proj-a")
         # the real agent command follows the -- separator
         sep = argv.index("--")
         self.assertEqual(argv[sep + 1:], ["my-agent", "--flag"])
@@ -462,6 +463,22 @@ class TestBwrapConfinement(unittest.TestCase):
                            if argv[k] == "--ro-bind" and argv[k + 2] == sandbox)
         self.assertGreater(codex_state, home_view)
         self.assertGreater(plugin_bind, codex_state)
+
+    def test_bwrap_shared_agent_state_bind_resolves_symlink_destination(self):
+        target = os.path.join(self._tmp.name, "real-storage", "domen", ".claude")
+        os.makedirs(target)
+        home = os.path.join(self._tmp.name, "home", "domen")
+        os.makedirs(home)
+        link = os.path.join(home, ".claude")
+        os.symlink(target, link)
+
+        argv = self._capture_argv(["claude"], "claude", {},
+                                  agent_state_binds=[link])
+
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        self.assertIn(("--bind", target, target), triples)
+        self.assertNotIn(("--bind", target, link), triples)
 
     def test_bwrap_protect_agent_state_omits_shared_agent_state_binds(self):
         paths, binds = self._agent_state_binds()

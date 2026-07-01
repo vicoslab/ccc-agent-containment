@@ -304,6 +304,14 @@ class TestUnifiedMain(unittest.TestCase):
         self.assertEqual(main(["list", "--config", self.h.config_path],
                               env={}), 0)
 
+    def test_version_flag_reports_release_without_config(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["--version"], env={})
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "ccc-agent v0.2\n")
+
 
 class TestMainCtlCheckBeforeFinal(unittest.TestCase):
     """Exit-code contract for the hook: 2 = repair, 0 = allow/exhausted."""

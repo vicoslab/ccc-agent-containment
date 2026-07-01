@@ -29,6 +29,7 @@ import subprocess
 import sys
 from importlib import resources
 
+from . import __version__
 from .branchfs import BranchfsCli, FakeBranchFS
 from .control import (ControlClient, VERDICT_COMMITTED, VERDICT_HELD,
                       VERDICT_NEEDS_APPROVAL)
@@ -400,6 +401,8 @@ def _print_main_help(stream=None):
     stream.write(
         "usage: ccc-agent OP [options]\n\n"
         "Unified CCC agent containment CLI.\n\n"
+        "Global options:\n"
+        "  --version        print the ccc-agent release version\n\n"
         "Primary ops:\n"
         "  run              run a command in a contained BranchFS session\n"
         "  setup            write config, plugin entries, and optional shims\n"
@@ -417,6 +420,9 @@ def _print_main_help(stream=None):
 def main(argv=None, env=None):
     """Dispatch the unified ``ccc-agent OP`` command surface."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "--version":
+        sys.stdout.write("ccc-agent v%s\n" % __version__)
+        return 0
     if not argv or argv[0] in ("-h", "--help", "help"):
         _print_main_help()
         return 0
