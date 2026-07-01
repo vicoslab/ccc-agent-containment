@@ -158,6 +158,27 @@ def _write_session_start_banner(session, alias_map, confinement, stream=None):
             % (alias_map.canonicalize(root.visible), root.mount))
 
 
+def _auto_commit_finish_detail(store, session):
+    """Return the short parenthesized result for an auto-committed session."""
+    if session.state != "auto-committed":
+        return ""
+    path = os.path.join(store.review_dir(session.session_id),
+                        "policy-decision.json")
+    try:
+        with open(path) as fh:
+            total = int(json.load(fh).get("total_changes", 0))
+    except (OSError, ValueError, TypeError):
+        return ""
+    if total == 0:
+        return " (no changes)"
+    noun = "update" if total == 1 else "updates"
+    return " (%d %s in workspace)" % (total, noun)
+
+
+def _finish_state_label(store, session):
+    return session.state + _auto_commit_finish_detail(store, session)
+
+
 def main_run(argv=None, env=None, prog="ccc-agent run"):
     parser = argparse.ArgumentParser(
         prog=prog,
@@ -247,7 +268,8 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
     session = run_session(runner_config, env=env)
 
     sys.stderr.write("ccc-agent: session %s finished: %s\n"
-                     % (session.session_id, session.state))
+                     % (session.session_id,
+                        _finish_state_label(store, session)))
 
     # Surface WHY it failed: the failure paths in run_session record the reason
     # as an "error" event (mount/launch/finalize/commit detail, incl. branchfs
