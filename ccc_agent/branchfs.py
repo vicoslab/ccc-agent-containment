@@ -11,19 +11,46 @@ Both backends speak in terms of :class:`ccc_agent.session.ProtectedRoot`.
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 
 from .policy import Change
 
 
+DEFAULT_BRANCHFS_TIMEOUT_SECONDS = 30
+
+
 class BranchfsError(Exception):
     pass
 
 
-def _run_subprocess(argv):
-    proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          text=True)
+def _format_timeout_seconds(value):
+    return "%gs" % float(value)
+
+
+def _coerce_output(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
+def _run_subprocess(argv, timeout=DEFAULT_BRANCHFS_TIMEOUT_SECONDS):
+    try:
+        proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        label = " ".join(str(part) for part in argv[:2])
+        command = " ".join(shlex.quote(str(part)) for part in argv)
+        detail = (_coerce_output(exc.stderr) or _coerce_output(exc.stdout)).strip()
+        if detail:
+            detail = ": " + detail
+        raise BranchfsError(
+            "%s timed out after %s; command: %s%s"
+            % (label, _format_timeout_seconds(timeout), command, detail)
+        )
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -66,9 +93,15 @@ def _changes_from_status(data, root):
 class BranchfsCli(object):
     """Drives the branchfs CLI; one daemon per protected root (per store)."""
 
-    def __init__(self, binary="branchfs", run=_run_subprocess):
+    def __init__(self, binary="branchfs", run=None,
+                 timeout_seconds=DEFAULT_BRANCHFS_TIMEOUT_SECONDS):
         self.binary = binary
-        self._run = run
+        self.timeout_seconds = timeout_seconds
+        if run is None:
+            self._run = lambda argv: _run_subprocess(
+                argv, timeout=self.timeout_seconds)
+        else:
+            self._run = run
 
     def _invoke(self, *argv):
         code, out, err = self._run([self.binary] + [str(a) for a in argv])

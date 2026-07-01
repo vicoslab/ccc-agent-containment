@@ -444,14 +444,66 @@ def _ensure_shared_agent_state_dirs(config):
         os.makedirs(os.path.realpath(src), mode=0o700, exist_ok=True)
 
 
+def _agent_state_symlink_target_dir(path):
+    """Return the agent-state directory containing a symlink target, if any.
+
+    Users sometimes keep a file such as ``~/.codex/config.toml`` as an absolute
+    symlink to another shared location like ``/storage/user/.codex/config.toml``.
+    Binding only ``~/.codex`` over the BranchFS home view is not enough: inside
+    bwrap, following that symlink reaches the protected ``/storage`` view unless
+    the target agent-state directory is also rebound as shared runtime state.
+
+    Keep this intentionally narrow: only directories named like known agent-state
+    homes (``.codex``, ``.claude``, ``.hermes``) are auto-bound.  A symlink from
+    an agent state dir to an arbitrary project/data path should remain protected.
+    """
+    if not path or not str(path).startswith("/"):
+        return None
+    target = os.path.realpath(path)
+    parts = target.strip(os.sep).split(os.sep)
+    current = os.sep
+    for part in parts:
+        current = os.path.join(current, part)
+        if part in AGENT_STATE_DIRS:
+            return current if os.path.isdir(current) else None
+    return None
+
+
+def _shared_agent_state_symlink_target_binds(config):
+    """Extra same-path rw binds for absolute symlink targets in agent homes."""
+    if config.protect_agent_state:
+        return []
+    binds = []
+    seen = set()
+    for entry in config.agent_state_binds:
+        src, _dest = _bind_parts(entry)
+        if not src or not str(src).startswith("/"):
+            continue
+        root = os.path.realpath(src)
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in list(dirnames) + list(filenames):
+                candidate = os.path.join(dirpath, name)
+                if not os.path.islink(candidate):
+                    continue
+                target_dir = _agent_state_symlink_target_dir(candidate)
+                if target_dir and target_dir != root and target_dir not in seen:
+                    seen.add(target_dir)
+                    binds.append((target_dir, target_dir))
+    return binds
+
+
 def _append_shared_agent_state_binds(argv, config):
-    """Bind Codex/Claude/Hermes state rw over the BranchFS home view."""
+    """Bind Codex/Claude/Hermes state rw over BranchFS-backed views."""
     if config.protect_agent_state:
         return
     for entry in config.agent_state_binds:
         bind = _optional_rw_dir_bind(entry)
         if bind is not None:
             argv += ["--bind", bind[0], bind[1]]
+    for src, dest in _shared_agent_state_symlink_target_binds(config):
+        argv += ["--bind", src, dest]
 
 
 def _bwrap_command(session, config, control=None):

@@ -3,8 +3,10 @@ in-memory FakeBranchFS used by runner tests."""
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from ccc_agent.branchfs import BranchfsCli, BranchfsError, FakeBranchFS
 from ccc_agent.session import ProtectedRoot
@@ -166,6 +168,22 @@ class TestBranchfsCli(unittest.TestCase):
         with self.assertRaises(BranchfsError) as ctx:
             cli.freeze(self.root)
         self.assertIn("daemon not running", str(ctx.exception))
+
+    def test_hung_branchfs_command_times_out_with_context(self):
+        def block_forever(argv, **kwargs):
+            timeout = kwargs.get("timeout", 30)
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        with mock.patch("ccc_agent.branchfs.subprocess.run",
+                        side_effect=block_forever) as run:
+            cli = BranchfsCli(binary="branchfs")
+            with self.assertRaises(BranchfsError) as ctx:
+                cli.start_daemon(self.root)
+
+        self.assertEqual(run.call_args.kwargs.get("timeout"), 30)
+        message = str(ctx.exception)
+        self.assertIn("branchfs start-daemon timed out after 30s", message)
+        self.assertIn(self.root.store, message)
 
     def test_commit_and_abort_use_trusted_branch_commands(self):
         runner = RecordingRunner()

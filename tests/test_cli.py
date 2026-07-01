@@ -12,7 +12,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ccc_agent import cli as cli_mod
-from ccc_agent.cli import load_config, main, main_ctl, main_run
+from ccc_agent.branchfs import BranchfsCli
+from ccc_agent.cli import build_runtime, load_config, main, main_ctl, main_run
 from ccc_agent.session import ProtectedRoot, SessionStore
 
 
@@ -66,6 +67,31 @@ class TestLoadConfig(unittest.TestCase):
     def test_missing_config_exits(self):
         with self.assertRaises(SystemExit):
             load_config(env={})
+
+
+class TestBuildRuntime(unittest.TestCase):
+    def test_branchfs_timeout_seconds_configures_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {
+                "state_dir": os.path.join(tmp, "state"),
+                "backend": "branchfs",
+                "branchfs_bin": "/bin/branchfs-test",
+                "branchfs_timeout_seconds": 42,
+                "user": "domen",
+                "home_subdir": "",
+                "roots": [{
+                    "name": "storage_user",
+                    "base": os.path.join(tmp, "base"),
+                    "store": os.path.join(tmp, "store"),
+                    "visible": "/storage/user",
+                }],
+            }
+
+            _store, backend, _alias_map, _user, _roots = build_runtime(config)
+
+            self.assertIsInstance(backend, BranchfsCli)
+            self.assertEqual(backend.binary, "/bin/branchfs-test")
+            self.assertEqual(backend.timeout_seconds, 42)
 
 
 class TestShellDefault(unittest.TestCase):

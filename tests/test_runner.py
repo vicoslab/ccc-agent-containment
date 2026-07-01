@@ -496,6 +496,46 @@ class TestBwrapConfinement(unittest.TestCase):
         self.assertIn(("--bind", target, target), triples)
         self.assertNotIn(("--bind", target, link), triples)
 
+    def test_bwrap_shared_agent_state_binds_symlink_target_agent_dir(self):
+        # Regression for ~/.codex/config.toml -> /storage/user/.codex/config.toml:
+        # binding ~/.codex alone leaves the absolute symlink target inside the
+        # BranchFS /storage view, so bind the target .codex dir as shared state too.
+        codex_home = os.path.join(self._tmp.name, "real-agent-state", "codex")
+        os.makedirs(codex_home)
+        target_dir = os.path.join(self._tmp.name, "storage", "user", ".codex")
+        os.makedirs(target_dir)
+        target = os.path.join(target_dir, "config.toml")
+        with open(target, "w") as fh:
+            fh.write("model = 'test'\n")
+        os.symlink(target, os.path.join(codex_home, "config.toml"))
+
+        argv = self._capture_argv(["codex"], "codex", {},
+                                  agent_state_binds=[codex_home +
+                                                     ":/home/domen/.codex"])
+
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        self.assertIn(("--bind", codex_home, "/home/domen/.codex"), triples)
+        self.assertIn(("--bind", target_dir, target_dir), triples)
+
+    def test_bwrap_shared_agent_state_does_not_bind_arbitrary_symlink_target(self):
+        codex_home = os.path.join(self._tmp.name, "real-agent-state", "codex")
+        os.makedirs(codex_home)
+        project_dir = os.path.join(self._tmp.name, "storage", "user", "project")
+        os.makedirs(project_dir)
+        target = os.path.join(project_dir, "config.toml")
+        with open(target, "w") as fh:
+            fh.write("project-owned\n")
+        os.symlink(target, os.path.join(codex_home, "project-config.toml"))
+
+        argv = self._capture_argv(["codex"], "codex", {},
+                                  agent_state_binds=[codex_home +
+                                                     ":/home/domen/.codex"])
+
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        self.assertNotIn(("--bind", project_dir, project_dir), triples)
+
     def test_bwrap_protect_agent_state_omits_shared_agent_state_binds(self):
         paths, binds = self._agent_state_binds()
 

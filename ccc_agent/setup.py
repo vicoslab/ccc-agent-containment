@@ -228,6 +228,7 @@ def build_config(mode, user, home, branchfs_bin, bwrap_bin, state_dir,
         "state_dir": state_dir,
         "backend": "branchfs",
         "branchfs_bin": branchfs_bin,
+        "branchfs_timeout_seconds": 30,
         "user": user,
         "home_subdir": top_home_subdir,
         "_workspace_comment": (

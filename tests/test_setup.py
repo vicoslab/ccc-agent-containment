@@ -134,6 +134,7 @@ class TestSetupConfig(unittest.TestCase):
         self.assertIn("/home/domen/.hermes", cfg["agent_state_binds"])
         self.assertEqual(cfg["roots"][0]["visible"], "/storage")
         self.assertEqual(cfg["roots"][0]["home_subdir"], "user/domen-cuda10")
+        self.assertEqual(cfg["branchfs_timeout_seconds"], 30)
         self.assertNotIn("workspace", cfg)
 
     def test_user_config_keeps_agent_state_writable_by_default(self):

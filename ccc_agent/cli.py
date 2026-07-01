@@ -6,6 +6,7 @@ Runtime configuration comes from a JSON file (stdlib-only trusted layer):
       "state_dir": "/storage/user/.ccc-agent",
       "backend": "branchfs",            // or "fake" for dry-run/demo
       "branchfs_bin": "branchfs",
+      "branchfs_timeout_seconds": 30,     // fail hung BranchFS CLI calls
       "user": "domen",
       "home_subdir": "",
       "roots": [
@@ -131,7 +132,9 @@ def build_runtime(config):
     if config.get("backend", "branchfs") == "fake":
         backend = FakeBranchFS()
     else:
-        backend = BranchfsCli(binary=config.get("branchfs_bin", "branchfs"))
+        backend = BranchfsCli(
+            binary=config.get("branchfs_bin", "branchfs"),
+            timeout_seconds=config.get("branchfs_timeout_seconds", 30))
     user = config.get("user") or getpass.getuser()
     alias_map = AliasMap.for_home(user,
                                   home_subdir=config.get("home_subdir", ""))
