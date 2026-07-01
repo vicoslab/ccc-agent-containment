@@ -50,8 +50,8 @@ created -> mounting -> running -> finalizing -> frozen
   allowed the stop — then `branchfs status --json` per root feeds the policy
   engine.
 - `pending-review` keeps branches frozen; the branchfs daemon may exit (it
-  auto-exits with its last mount) — `ccc-agent commit/abort` re-ensures it
-  from session metadata (`branchfs start-daemon --base ... --storage ...`).
+  auto-exits with its last mount) — `ccc-agent commit/abort SESSION [SESSION ...]`
+  re-ensures it from session metadata (`branchfs start-daemon --base ... --storage ...`).
 - Commit failures never abort: the branch is preserved and the session is
   marked `failed` for manual recovery.
 - Nested agents: a shim or `ccc-agent run` invoked with `CCC_AGENT_SESSION`

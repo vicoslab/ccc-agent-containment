@@ -96,9 +96,9 @@ def render_summary(session, changes_by_root, decision):
     out("ccc-agent diff %s          # list changed paths" % session.session_id)
     out("ccc-agent diff %s <path>   # unified diff for one text file" %
         session.session_id)
-    out("ccc-agent commit %s   # apply branch to real storage" %
+    out("ccc-agent commit %s   # apply branch to real storage; repeat IDs to batch" %
         session.session_id)
-    out("ccc-agent abort %s    # discard branch" % session.session_id)
+    out("ccc-agent abort %s    # discard branch; repeat IDs to batch" % session.session_id)
     out("```")
     out("")
     return "\n".join(lines)

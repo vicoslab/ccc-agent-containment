@@ -613,6 +613,47 @@ class TestMainCtl(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    def store(self):
+        return SessionStore(os.path.join(self.h.tmp, "state"))
+
+    def make_pending_session(self, relpath):
+        before = set(self.h.sessions())
+        self.assertEqual(main_run([
+            "--config", self.h.config_path,
+            "--workspace", "/storage/user/Projects/proj-a",
+            "--policy", "manual",
+            "--", "sh", "-c", "printf 'x\\n' > %s" % relpath,
+        ], env={}), 0)
+        created = sorted(set(self.h.sessions()) - before)
+        self.assertEqual(len(created), 1)
+        return created[0]
+
+    def make_running_session(self, session_id, dirty_rel=None):
+        store = self.store()
+        branch_store = os.path.join(self.h.tmp, "stores", "storage_user")
+        files = os.path.join(branch_store, "branches", session_id, "files")
+        os.makedirs(files, exist_ok=True)
+        root = ProtectedRoot(
+            name="storage_user", base=self.h.base, store=branch_store,
+            branch=session_id, mount=os.path.join(self.h.tmp, "mounts", session_id),
+            visible="/storage/user", home_subdir="")
+        session = store.create(
+            owner="domen", agent_kind="codex", agent_command=["codex"],
+            workspace="/storage/user/Projects/proj-a",
+            policy={"mode": "manual",
+                    "allowed_scopes": ["/storage/user/Projects/proj-a"]},
+            protected_roots={"storage_user": root}, completion="manual",
+            session_id=session_id)
+        session.transition("mounting")
+        session.transition("running")
+        store.save(session)
+        if dirty_rel:
+            path = os.path.join(files, dirty_rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("x\n")
+        return session_id
+
     def test_list_and_show_roundtrip(self):
         main_run([
             "--config", self.h.config_path,
@@ -645,6 +686,85 @@ class TestMainCtl(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("--- a/Projects/proj-a/cli.txt", out.getvalue())
         self.assertIn("+new", out.getvalue())
+
+    def test_abort_accepts_multiple_session_ids_and_reports_each_ok(self):
+        sid1 = self.make_pending_session("abort-one.txt")
+        sid2 = self.make_pending_session("abort-two.txt")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = main_ctl(["--config", self.h.config_path, "abort",
+                             sid1, sid2], env={})
+
+        self.assertEqual(code, 0)
+        self.assertIn("%s: ok\n" % sid1, err.getvalue())
+        self.assertIn("%s: ok\n" % sid2, err.getvalue())
+        self.assertEqual(self.store().load(sid1).state, "aborted")
+        self.assertEqual(self.store().load(sid2).state, "aborted")
+        self.assertFalse(os.path.exists(os.path.join(
+            self.h.base, self.h.workspace_rel, "abort-one.txt")))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.h.base, self.h.workspace_rel, "abort-two.txt")))
+
+    def test_commit_accepts_multiple_session_ids_and_reports_each_ok(self):
+        sid1 = self.make_pending_session("commit-one.txt")
+        sid2 = self.make_pending_session("commit-two.txt")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = main_ctl(["--config", self.h.config_path, "commit",
+                             sid1, sid2], env={})
+
+        self.assertEqual(code, 0)
+        self.assertIn("%s: ok\n" % sid1, err.getvalue())
+        self.assertIn("%s: ok\n" % sid2, err.getvalue())
+        self.assertEqual(self.store().load(sid1).state, "committed")
+        self.assertEqual(self.store().load(sid2).state, "committed")
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.h.base, self.h.workspace_rel, "commit-one.txt")))
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.h.base, self.h.workspace_rel, "commit-two.txt")))
+
+    def test_batch_session_op_continues_after_error(self):
+        sid = self.make_pending_session("abort-after-error.txt")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = main_ctl(["--config", self.h.config_path, "abort",
+                             "agent-missing", sid], env={})
+
+        self.assertEqual(code, 1)
+        self.assertIn("agent-missing: error: no such session", err.getvalue())
+        self.assertIn("%s: ok\n" % sid, err.getvalue())
+        self.assertEqual(self.store().load(sid).state, "aborted")
+
+    def test_thaw_finish_and_finish_turn_accept_multiple_session_ids(self):
+        thaw1 = self.make_pending_session("thaw-one.txt")
+        thaw2 = self.make_pending_session("thaw-two.txt")
+        run1 = self.make_running_session("agent-finish-one", "finish-one.txt")
+        run2 = self.make_running_session("agent-finish-two", "finish-two.txt")
+        turn1 = self.make_pending_session("turn-one.txt")
+        turn2 = self.make_pending_session("turn-two.txt")
+
+        for op, ids in (("thaw", (thaw1, thaw2)),
+                        ("finish", (run1, run2)),
+                        ("finish-turn", (turn1, turn2))):
+            with self.subTest(op=op):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = main_ctl(["--config", self.h.config_path, op]
+                                    + list(ids), env={})
+                self.assertEqual(code, 0)
+                for sid in ids:
+                    self.assertIn("%s: ok" % sid, err.getvalue())
+
+        self.assertEqual(self.store().load(thaw1).state, "running")
+        self.assertEqual(self.store().load(thaw2).state, "running")
+        self.assertEqual(self.store().load(run1).state, "pending-review")
+        self.assertEqual(self.store().load(run2).state, "pending-review")
+        for sid in (turn1, turn2):
+            self.assertTrue(any(e["event"] == "turn-finished"
+                                for e in self.store().load(sid).events))
 
     def test_ctl_error_returns_nonzero(self):
         self.assertEqual(
@@ -706,6 +826,11 @@ class TestShellCompletion(unittest.TestCase):
         self.assertEqual(
             self.complete(["ccc-agent", "diff", "agent-alpha", ""]),
             [])
+
+    def test_multi_session_ops_complete_additional_session_ids(self):
+        self.assertEqual(
+            self.complete(["ccc-agent", "abort", "agent-alpha", "agent-b"]),
+            ["agent-beta"])
 
     def test_list_accepts_completed_session_prefix(self):
         out = io.StringIO()
