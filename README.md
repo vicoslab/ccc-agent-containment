@@ -67,6 +67,8 @@ ccc-agent review <session> --reject         # discard everything
 ccc-agent review <session> --commit a,b     # commit only a,b (file-by-file)
 ccc-agent review <session> --emit-patch > c.patch  # line-by-line: prune hunks…
 ccc-agent review <session> --apply-patch c.patch   # …then apply
+ccc-agent commit <session> [<session> ...]  # commit one or more pending/frozen sessions
+ccc-agent abort <session> [<session> ...]   # discard one or more sessions
 ```
 
 Or directly via the BranchFS CLI (branch name == session id):

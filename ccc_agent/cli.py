@@ -544,10 +544,48 @@ _SESSION_ID_CTL_OPS = (
     "show", "status", "commit", "abort", "thaw", "finish",
     "finish-turn", "check-before-final",
 )
+_BATCH_SESSION_ID_CTL_OPS = (
+    "commit", "abort", "thaw", "finish", "finish-turn",
+)
 
 
-def _add_session_id_arg(parser):
-    parser.add_argument("session_id", metavar="session-id")
+def _add_session_id_arg(parser, multiple=False):
+    if multiple:
+        parser.add_argument("session_ids", nargs="+", metavar="session-id")
+    else:
+        parser.add_argument("session_id", metavar="session-id")
+
+
+def _batch_ok_detail(cmd, session):
+    if cmd == "finish":
+        return " (%s)" % session.state
+    return ""
+
+
+def _run_batch_session_op(controller, cmd, session_ids, stream=None):
+    stream = sys.stderr if stream is None else stream
+    failed = False
+    for session_id in session_ids:
+        try:
+            if cmd == "commit":
+                session = controller.commit(session_id)
+            elif cmd == "abort":
+                session = controller.abort(session_id)
+            elif cmd == "thaw":
+                session = controller.thaw(session_id)
+            elif cmd == "finish":
+                session = controller.finish(session_id)
+            elif cmd == "finish-turn":
+                session = controller.finish_turn(session_id)
+            else:
+                raise ControlError("unsupported batch op: %s" % cmd)
+        except ControlError as exc:
+            failed = True
+            stream.write("%s: error: %s\n" % (session_id, exc))
+            continue
+        stream.write("%s: ok%s\n"
+                     % (session.session_id, _batch_ok_detail(cmd, session)))
+    return 1 if failed else 0
 
 
 def main_ctl(argv=None, env=None, prog="ccc-agent"):
@@ -570,7 +608,7 @@ def main_ctl(argv=None, env=None, prog="ccc-agent"):
                     help="optional session id prefix filter")
     for name in _SESSION_ID_CTL_OPS:
         p = sub.add_parser(name)
-        _add_session_id_arg(p)
+        _add_session_id_arg(p, multiple=name in _BATCH_SESSION_ID_CTL_OPS)
     dp = sub.add_parser("diff", help="show changed paths, or a unified diff for one file")
     _add_session_id_arg(dp)
     dp.add_argument("path", nargs="?", help="optional changed file to diff")
@@ -625,20 +663,8 @@ def main_ctl(argv=None, env=None, prog="ccc-agent"):
             if session.state in ("committed", "aborted"):
                 sys.stderr.write("session %s now %s\n"
                                  % (session.session_id, session.state))
-        elif args.cmd == "commit":
-            session = controller.commit(args.session_id)
-            sys.stderr.write("committed session %s\n" % session.session_id)
-        elif args.cmd == "abort":
-            session = controller.abort(args.session_id)
-            sys.stderr.write("aborted session %s\n" % session.session_id)
-        elif args.cmd == "thaw":
-            controller.thaw(args.session_id)
-        elif args.cmd == "finish":
-            session = controller.finish(args.session_id)
-            sys.stderr.write("session %s now %s\n"
-                             % (session.session_id, session.state))
-        elif args.cmd == "finish-turn":
-            controller.finish_turn(args.session_id)
+        elif args.cmd in _BATCH_SESSION_ID_CTL_OPS:
+            return _run_batch_session_op(controller, args.cmd, args.session_ids)
         elif args.cmd == "check-before-final":
             # exit 2 = "block the stop, repair": the only code that loops the
             # agent. Allow and exhausted both exit 0 so hooks cannot livelock.
@@ -672,6 +698,7 @@ _CTL_OPS = (set(_SESSION_ID_CTL_OPS) | {
 _SESSION_ID_COMPLETION_OPS = (
     set(_SESSION_ID_CTL_OPS) | {"diff", "review", "list"}
 )
+_MULTI_SESSION_ID_COMPLETION_OPS = set(_BATCH_SESSION_ID_CTL_OPS)
 _MAIN_OPS = tuple(sorted(_CTL_OPS | {
     "run", "launch", "setup", "softsandbox", "completion",
 }))
@@ -827,9 +854,14 @@ def _complete_words(words, cword, env=None):
         tokens, cmd_idx, cword, op)
     if current_is_option_value:
         return []
-    if op in _SESSION_ID_COMPLETION_OPS and not positionals:
-        return _session_id_completions(
-            prefix, config_path=_completion_config_path(tokens, cword), env=env)
+    if op in _SESSION_ID_COMPLETION_OPS:
+        if op in _MULTI_SESSION_ID_COMPLETION_OPS or not positionals:
+            matches = _session_id_completions(
+                prefix, config_path=_completion_config_path(tokens, cword),
+                env=env)
+            if op in _MULTI_SESSION_ID_COMPLETION_OPS:
+                return [match for match in matches if match not in positionals]
+            return matches
     return []
 
 
