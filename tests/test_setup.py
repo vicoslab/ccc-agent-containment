@@ -128,6 +128,7 @@ class TestSetupConfig(unittest.TestCase):
         self.assertIn("/storage/user/domen-cuda10/.claude*", ignore)
         self.assertEqual(cfg["roots"][0]["visible"], "/storage")
         self.assertEqual(cfg["roots"][0]["home_subdir"], "user/domen-cuda10")
+        self.assertNotIn("workspace", cfg)
 
     def test_user_config_keeps_agent_state_writable_by_default(self):
         cfg = setup_mod.build_config(
@@ -149,6 +150,7 @@ class TestSetupConfig(unittest.TestCase):
         ignore = cfg["policy"]["ignore_patterns"]
         self.assertIn("/home/domen/.codex*", ignore)
         self.assertIn("/home/domen/.claude*", ignore)
+        self.assertNotIn("workspace", cfg)
 
     def test_setup_uses_plugins_not_global_agent_config_overlays(self):
         with tempfile.TemporaryDirectory() as tmp:

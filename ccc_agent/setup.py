@@ -205,7 +205,6 @@ def build_config(mode, user, home, branchfs_bin, bwrap_bin, state_dir,
             "hide_paths": hide_paths,
         }
         top_home_subdir = container                          # alias /home/<user> -> /storage/user/<container>
-        workspace = "/home/%s" % user
         ignore = ["%s/.codex*" % home_abs, "%s/.claude*" % home_abs,
                   "%s/.config*" % home_abs, "%s/.cache*" % home_abs]
     else:  # user mode: protect the real home
@@ -216,7 +215,6 @@ def build_config(mode, user, home, branchfs_bin, bwrap_bin, state_dir,
             "hide_paths": _SECRETS + [".ccc-agent"],
         }
         top_home_subdir = ""
-        workspace = home
         ignore = [os.path.join(home, ".codex*"), os.path.join(home, ".claude*"),
                   os.path.join(home, ".config*"), os.path.join(home, ".cache*")]
     agent_plugins = build_agent_plugins(home)
@@ -228,7 +226,9 @@ def build_config(mode, user, home, branchfs_bin, bwrap_bin, state_dir,
         "branchfs_bin": branchfs_bin,
         "user": user,
         "home_subdir": top_home_subdir,
-        "workspace": workspace,
+        "_workspace_comment": (
+            "Launch workspace is per invocation: ccc-agent run defaults to "
+            "the caller's current directory; pass --workspace to override."),
         "confinement": "bwrap",
         "bwrap_bin": bwrap_bin,
         "bwrap_proc_mode": "bind",

@@ -116,7 +116,13 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
 
     config = load_config(args.config, env=env)
     store, backend, alias_map, user, roots = build_runtime(config)
-    workspace = args.workspace or config.get("workspace") or os.getcwd()
+    # The workspace is deliberately a *launch-time* value.  Generated system
+    # configs used to include a broad home default (e.g. /home/domen, which
+    # aliases to /storage/user/<container> on CCC), but a bare `ccc-agent run
+    # codex` must protect the directory where the user invoked it.  Keep config
+    # roots/policy as deployment defaults; use --workspace for explicit
+    # per-invocation overrides.
+    workspace = args.workspace or os.getcwd()
     config_policy = config.get("policy", {})
     policy = {
         "mode": config_policy.get("mode", args.policy),

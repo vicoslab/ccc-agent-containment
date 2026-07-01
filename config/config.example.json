@@ -8,7 +8,7 @@
 
   "_alias_comment": "home_subdir feeds the policy alias /home/<user> -> /storage/user/<home_subdir>. CCC mounts the user home to the same bytes as /storage/user/<container>, so set this to the container name to dedup them in policy.",
   "home_subdir": "domen-cuda10",
-  "workspace": "/home/domen",
+  "_workspace_comment": "Launch workspace is per invocation: ccc-agent run defaults to the caller's current directory; pass --workspace to override.",
 
   "_confinement_comment": "bwrap = real rootless sandbox (default). none = debug only, NOT a boundary.",
   "confinement": "bwrap",

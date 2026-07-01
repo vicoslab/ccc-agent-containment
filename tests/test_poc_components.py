@@ -1,13 +1,11 @@
-"""Component tests for the PoC soft sandbox and plugin installer.
+"""Component tests for the PoC soft sandbox and packaged helper scripts.
 
 Tests all components without requiring FUSE or root:
   - soft sandbox isolate mode (write/modify/delete tracking)
   - soft sandbox tracking mode (pre-run snapshot diff)
-  - plugin installer --no-hooks (file layout verification)
   - hook scripts (syntax checks + dry-run behavior)
 """
 
-import json
 import os
 import shutil
 import subprocess
@@ -84,25 +82,6 @@ class SandboxTestBase(unittest.TestCase):
         argv.extend(extra_args)
         argv.extend(["--", "bash", "-c", cmd])
         return run(argv, env=BRANCHFS_ENV, input=input), state_dir
-
-    def run_installer(self, extra_args=()):
-        prefix = os.path.join(self.tmp, "prefix")
-        bin_dir = os.path.join(self.tmp, "bin")
-        state_dir = os.path.join(self.tmp, "agent-state")
-        argv = [
-            "bash",
-            os.path.join(REPO, "install-ccc-agent-plugin.sh"),
-            "--prefix", prefix,
-            "--bin-dir", bin_dir,
-            "--state-dir", state_dir,
-            "--workspace", self.tmp,
-            "--no-hooks",
-        ]
-        if BRANCHFS_BIN:
-            argv.extend(["--branchfs", BRANCHFS_BIN])
-        argv.extend(extra_args)
-        result = run(argv, env=BRANCHFS_ENV)
-        return result, prefix, bin_dir
 
 
 # ---------------------------------------------------------------------------
@@ -230,77 +209,7 @@ class TestSoftsandboxIsolate(SandboxTestBase):
 
 
 # ---------------------------------------------------------------------------
-# § 2  Plugin installer
-# ---------------------------------------------------------------------------
-class TestPluginInstaller(SandboxTestBase):
-
-    def test_installer_dry_run_shows_plan(self):
-        result, prefix, bin_dir = self.run_installer(["--dry-run"])
-        combined = result.stdout + result.stderr
-        self.assertIn("DRY RUN", combined)
-        self.assertIn("supervisor Python package", combined)
-        self.assertNotEqual(result.returncode, 1, result.stderr)
-
-    def test_installer_file_layout(self):
-        result, prefix, bin_dir = self.run_installer()
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-        # lib/ccc_agent package
-        self.assertTrue(os.path.isfile(
-            os.path.join(prefix, "lib", "ccc_agent", "__init__.py")))
-
-        # hooks
-        for hook in ("claude-stop-hook.sh", "codex-stop-hook.sh"):
-            self.assertTrue(os.path.isfile(os.path.join(prefix, "hooks", hook)),
-                            f"missing hook: {hook}")
-
-        # unified CLI script
-        self.assertTrue(os.path.isfile(os.path.join(prefix, "bin", "ccc-agent")))
-
-        # PATH wrapper
-        wrapper = os.path.join(bin_dir, "ccc-agent")
-        self.assertTrue(os.path.isfile(wrapper), "missing wrapper: ccc-agent")
-        self.assertTrue(os.access(wrapper, os.X_OK), "wrapper not exec: ccc-agent")
-
-    def test_installed_wrapper_sets_pythonpath(self):
-        result, prefix, bin_dir = self.run_installer()
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-        wrapper = os.path.join(bin_dir, "ccc-agent")
-        with open(wrapper) as f:
-            content = f.read()
-        self.assertIn("PYTHONPATH", content)
-        self.assertIn(prefix, content)
-
-    def test_installed_run_help_works(self):
-        result, prefix, bin_dir = self.run_installer()
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-        env = dict(BRANCHFS_ENV)
-        env["PATH"] = bin_dir + ":" + env.get("PATH", "")
-        env["PYTHONPATH"] = os.path.join(prefix, "lib")
-        help_result = run(
-            [os.path.join(bin_dir, "ccc-agent"), "run", "--help"], env=env)
-        self.assertIn("usage", help_result.stdout.lower() + help_result.stderr.lower())
-
-    def test_uninstall_removes_prefix(self):
-        result, prefix, bin_dir = self.run_installer()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(os.path.isdir(prefix))
-
-        uninstall_result = run([
-            "bash",
-            os.path.join(REPO, "install-ccc-agent-plugin.sh"),
-            "--prefix", prefix,
-            "--bin-dir", bin_dir,
-            "--uninstall",
-        ], env=BRANCHFS_ENV)
-        self.assertFalse(os.path.isdir(prefix),
-                         "prefix dir should be removed after uninstall")
-
-
-# ---------------------------------------------------------------------------
-# § 3  Hook scripts
+# § 2  Hook scripts
 # ---------------------------------------------------------------------------
 class TestHookScripts(unittest.TestCase):
 
@@ -336,7 +245,7 @@ class TestHookScripts(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# § 5  Shim script
+# § 3  Shim script
 # ---------------------------------------------------------------------------
 class TestShimScript(unittest.TestCase):
 
@@ -398,7 +307,7 @@ class TestShimScript(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# § 6  poc_branchfs_test.sh
+# § 4  poc_branchfs_test.sh
 # ---------------------------------------------------------------------------
 @unittest.skipUnless(BRANCHFS_BIN, "no branchfs binary found")
 class TestPocBranchfsSuite(unittest.TestCase):
