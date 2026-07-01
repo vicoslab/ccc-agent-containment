@@ -4,6 +4,8 @@ import contextlib
 import io
 import json
 import os
+import signal
+import termios
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -278,6 +280,7 @@ class TestMainRun(unittest.TestCase):
         store = SessionStore(os.path.join(self.h.tmp, "state"))
         self.assertEqual(store.load(sid).state, "committed")
         self.assertIn("Accept changes?", stderr.getvalue())
+        self.assertIn("yes/y=commit", stderr.getvalue())
         self.assertIn("committed session", stderr.getvalue())
 
     def test_pending_review_quick_no_discards(self):
@@ -321,6 +324,91 @@ class TestMainRun(unittest.TestCase):
         store = SessionStore(os.path.join(self.h.tmp, "state"))
         self.assertEqual(store.load(sid).state, "pending-review")
         self.assertIn("kept for later review", stderr.getvalue())
+
+    def test_pending_review_escape_keeps_review_for_later(self):
+        stderr = io.StringIO()
+        with mock.patch("ccc_agent.cli._is_interactive_review", return_value=True):
+            with mock.patch("builtins.input", return_value="\x1b"):
+                with contextlib.redirect_stderr(stderr):
+                    code = main_run([
+                        "--config", self.h.config_path,
+                        "--workspace", "/storage/user/Projects/proj-a",
+                        "--policy", "manual",
+                        "--agent", "fake",
+                        "--", "sh", "-c", "echo out > artifact.txt",
+                    ], env={})
+
+        self.assertEqual(code, 0)
+        sid = self.h.sessions()[0]
+        store = SessionStore(os.path.join(self.h.tmp, "state"))
+        self.assertEqual(store.load(sid).state, "pending-review")
+        self.assertIn("later/l/Esc=keep for review", stderr.getvalue())
+
+    def test_review_choice_reads_single_escape_key_from_tty(self):
+        class FakeStdin(object):
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return 7
+
+            def read(self, size):
+                self.size = size
+                return "\x1b"
+
+        fake_stdin = FakeStdin()
+        with mock.patch("ccc_agent.cli.sys.stdin", fake_stdin):
+            with mock.patch("ccc_agent.cli.termios.tcgetattr",
+                            return_value=["old"]):
+                with mock.patch("ccc_agent.cli.tty.setcbreak") as setcbreak:
+                    with mock.patch("ccc_agent.cli.termios.tcsetattr") as restore:
+                        choice = getattr(cli_mod, "_read_review_choice")()
+
+        self.assertEqual(choice, "\x1b")
+        self.assertEqual(fake_stdin.size, 1)
+        setcbreak.assert_called_once_with(7)
+        restore.assert_called_once_with(7, termios.TCSADRAIN, ["old"])
+
+    def test_prompt_reclaims_terminal_foreground_group_before_reading(self):
+        class FakeStdin(object):
+            def fileno(self):
+                return 7
+
+        with mock.patch("ccc_agent.cli.sys.stdin", FakeStdin()):
+            with mock.patch("ccc_agent.cli.os.getpgrp", return_value=456):
+                with mock.patch("ccc_agent.cli.os.tcgetpgrp", return_value=123):
+                    with mock.patch("ccc_agent.cli.os.tcsetpgrp") as setpgrp:
+                        with mock.patch("ccc_agent.cli.signal.signal",
+                                        side_effect=["old-ttou", None]) as sig:
+                            ok = getattr(cli_mod,
+                                         "_ensure_foreground_for_prompt")()
+
+        self.assertTrue(ok)
+        setpgrp.assert_called_once_with(7, 456)
+        sig.assert_has_calls([
+            mock.call(signal.SIGTTOU, signal.SIG_IGN),
+            mock.call(signal.SIGTTOU, "old-ttou"),
+        ])
+
+    def test_nested_run_does_not_prompt_for_pending_review(self):
+        def fake_run_session(config, env=None):
+            return SimpleNamespace(session_id="agent-parent",
+                                   state="pending-review", events=[],
+                                   exit_status=0)
+
+        stderr = io.StringIO()
+        with mock.patch("ccc_agent.cli.run_session",
+                        side_effect=fake_run_session):
+            with mock.patch("ccc_agent.cli._handle_pending_review_finish",
+                            side_effect=AssertionError(
+                                "nested run must not review/prompt")):
+                with contextlib.redirect_stderr(stderr):
+                    code = main_run(["--config", self.h.config_path,
+                                     "--", "true"],
+                                    env={"CCC_AGENT_SESSION": "agent-parent"})
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("Accept changes?", stderr.getvalue())
 
     def test_large_pending_review_text_uses_less(self):
         class TtyBuffer(io.StringIO):

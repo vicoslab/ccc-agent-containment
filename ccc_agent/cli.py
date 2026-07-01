@@ -27,8 +27,11 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import termios
+import tty
 from importlib import resources
 
 from . import __version__
@@ -38,8 +41,8 @@ from .control import (ControlClient, VERDICT_COMMITTED, VERDICT_HELD,
 from .control import ControlError as ChannelError
 from .ctl import CHECK_REPAIR, Controller, ControlError
 from .paths import AliasMap
-from .runner import (ENV_CONTROL_SOCK, ENV_CONTROL_TOKEN, RootSpec,
-                     RunnerConfig, run_session)
+from .runner import (ENV_CONTROL_SOCK, ENV_CONTROL_TOKEN, ENV_SESSION,
+                     RootSpec, RunnerConfig, run_session)
 from .session import SessionStore
 
 CONFIG_ENV = "CCC_AGENT_CONFIG"
@@ -243,17 +246,66 @@ def _is_interactive_review():
     return sys.stdin.isatty() and sys.stderr.isatty()
 
 
+def _ensure_foreground_for_prompt():
+    """Reclaim terminal foreground after an interactive child shell exits.
+
+    An interactive shell started by `ccc-agent run` can leave the controlling
+    terminal's foreground process group pointing at the child shell's process
+    group.  If ccc-agent then calls input() while still in a background process
+    group, the kernel sends SIGTTIN and the outer shell reports the job as
+    stopped.  Put ccc-agent's process group back in the foreground first.
+    """
+    try:
+        fd = sys.stdin.fileno()
+        current = os.tcgetpgrp(fd)
+        ours = os.getpgrp()
+    except (AttributeError, OSError, ValueError):
+        return False
+    if current == ours:
+        return True
+    try:
+        old_ttou = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+        try:
+            os.tcsetpgrp(fd, ours)
+        finally:
+            signal.signal(signal.SIGTTOU, old_ttou)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _read_review_choice():
+    """Read one review decision key from a TTY; fall back to line input."""
+    if getattr(sys.stdin, "isatty", lambda: False)():
+        try:
+            fd = sys.stdin.fileno()
+            old_attrs = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                return sys.stdin.read(1)
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+        except (AttributeError, OSError, ValueError, termios.error):
+            pass
+    return input()
+
+
 def _prompt_pending_review_decision(controller, session, stream=None):
     stream = sys.stderr if stream is None else stream
+    _ensure_foreground_for_prompt()
     while True:
         stream.write(
             "ccc-agent: Accept changes? "
-            "yes=commit / no=discard / later=keep for review [later]: ")
+            "yes/y=commit / no/n=discard / "
+            "later/l/Esc=keep for review [later]: ")
         stream.flush()
         try:
-            choice = input().strip().lower()
+            raw_choice = _read_review_choice()
         except EOFError:
-            choice = "later"
+            raw_choice = "later"
+        if len(raw_choice) == 1 and raw_choice not in ("\n", "\r"):
+            stream.write("\n")
+        choice = raw_choice.strip().lower()
         if choice in ("y", "yes"):
             updated = controller.commit(session.session_id)
             stream.write("ccc-agent: committed session %s\n"
@@ -264,11 +316,11 @@ def _prompt_pending_review_decision(controller, session, stream=None):
             stream.write("ccc-agent: discarded session %s\n"
                          % updated.session_id)
             return updated
-        if choice in ("", "l", "later", "r", "review"):
+        if choice in ("", "l", "later", "r", "review", "\x1b", "esc"):
             stream.write("ccc-agent: kept for later review: %s\n"
                          % session.session_id)
             return session
-        stream.write("ccc-agent: please answer yes, no, or later.\n")
+        stream.write("ccc-agent: please answer yes/y, no/n, or later/l/Esc.\n")
 
 
 def _handle_pending_review_finish(store, backend, alias_map, session, stream=None):
@@ -353,6 +405,7 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
             "ccc-agent: WARNING confinement=none is NOT a security boundary "
             "(debug only); the agent can write outside the view. Set "
             "confinement=bwrap for real containment.\n")
+    nested_invocation = bool((os.environ if env is None else env).get(ENV_SESSION))
     runner_config = RunnerConfig(
         store=store, backend=backend, alias_map=alias_map, owner=user,
         agent_kind=args.agent, agent_command=command, workspace=workspace,
@@ -406,11 +459,11 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
             "ccc-agent: inspect with: ccc-agent show %s\n"
             % (store.session_file(session.session_id), session.session_id))
 
-    if session.state == "pending-review":
+    if session.state == "pending-review" and not nested_invocation:
         session = _handle_pending_review_finish(store, backend, alias_map,
                                                 session)
 
-    if session.state == "pending-review":
+    if session.state == "pending-review" and not nested_invocation:
         sys.stderr.write(
             "ccc-agent: review with: ccc-agent diff %s\n"
             "ccc-agent: file diff: ccc-agent diff %s <path>\n"
