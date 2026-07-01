@@ -423,6 +423,48 @@ class TestBwrapConfinement(unittest.TestCase):
         sep = argv.index("--")
         self.assertEqual(argv[sep + 1:], ["codex"])
 
+    def test_bwrap_auto_detects_plugin_from_absolute_executable_path(self):
+        src = self._make_plugin("codex-ccc-containment")
+        sandbox = "/home/domen/.codex/plugins/ccc-agent"
+        plugins = {"codex": {"src": src, "sandbox_path": sandbox,
+                             "ensure_dirs": ["/home/domen/.codex/plugins"],
+                             "argv": []}}
+        absolute_codex = os.path.join(self._tmp.name, "bin", "codex")
+
+        argv = self._capture_argv([absolute_codex, "exec", "x"],
+                                  "command", plugins)
+
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        self.assertIn(("--ro-bind", src, sandbox), triples)
+        sep = argv.index("--")
+        self.assertEqual(argv[sep + 1:], [absolute_codex, "exec", "x"])
+
+    def test_explicit_agent_kind_wins_over_executable_basename(self):
+        codex_src = self._make_plugin("codex-ccc-containment")
+        claude_src = self._make_plugin("claude-ccc-containment")
+        codex_sandbox = "/home/domen/.codex/plugins/ccc-agent"
+        claude_sandbox = "/ccc-agent/plugins/claude-ccc-containment"
+        plugins = {
+            "codex": {"src": codex_src, "sandbox_path": codex_sandbox,
+                      "ensure_dirs": ["/home/domen/.codex/plugins"],
+                      "argv": []},
+            "claude": {"src": claude_src, "sandbox_path": claude_sandbox,
+                       "argv": ["--plugin-dir", claude_sandbox]},
+        }
+        misleading_claude_path = os.path.join(self._tmp.name, "bin", "claude")
+
+        argv = self._capture_argv([misleading_claude_path, "-p", "x"],
+                                  "codex", plugins)
+
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        self.assertIn(("--ro-bind", codex_src, codex_sandbox), triples)
+        self.assertNotIn(("--ro-bind", claude_src, claude_sandbox), triples)
+        self.assertNotIn("--plugin-dir", argv)
+        sep = argv.index("--")
+        self.assertEqual(argv[sep + 1:], [misleading_claude_path, "-p", "x"])
+
     def test_bwrap_sets_plugin_env_for_hermes(self):
         src = self._make_plugin("hermes-ccc-containment")
         plugins = {"hermes": {

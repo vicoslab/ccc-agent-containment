@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from ccc_agent.cli import load_config, main, main_ctl, main_run
@@ -146,6 +147,42 @@ class TestMainRun(unittest.TestCase):
     def test_missing_command_errors(self):
         with self.assertRaises(SystemExit):
             main_run(["--config", self.h.config_path, "--"], env={})
+
+    def test_agent_option_sets_explicit_agent_kind(self):
+        seen = {}
+
+        def fake_run_session(config, env=None):
+            seen["config"] = config
+            return SimpleNamespace(
+                session_id="agent-test",
+                state="aborted",
+                events=[],
+                exit_status=0,
+            )
+
+        with mock.patch("ccc_agent.cli.run_session",
+                        side_effect=fake_run_session):
+            code = main_run([
+                "--config", self.h.config_path,
+                "--agent", "codex",
+                "/opt/agents/claude", "-p", "hello",
+            ], env={})
+
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["config"].agent_kind, "codex")
+        self.assertEqual(seen["config"].agent_command,
+                         ["/opt/agents/claude", "-p", "hello"])
+
+    def test_shortcut_agent_flags_are_not_supported(self):
+        for flag in ("--codex", "--claude", "--hermes"):
+            with self.subTest(flag=flag):
+                with mock.patch("ccc_agent.cli.run_session",
+                                side_effect=AssertionError(
+                                    "%s should not parse" % flag)):
+                    with self.assertRaises(SystemExit) as cm:
+                        main_run(["--config", self.h.config_path,
+                                  flag, "codex"], env={})
+                self.assertEqual(cm.exception.code, 2)
 
 
 class TestMainCtl(unittest.TestCase):

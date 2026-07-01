@@ -49,10 +49,21 @@ inserts any activation `argv` right after the agent executable, and exports any
 `setenv`. Direct, uncontained `codex` / `claude` / `hermes` invocations load none
 of this, and no user config file is edited or hidden.
 
+When no explicit agent flag is provided, `ccc-agent run` infers the plugin from
+the executable basename, including absolute paths such as `/opt/agents/bin/codex`:
+
+```text
+ccc-agent run -- codex exec "…"      # loads the Codex plugin
+ccc-agent run -- /path/to/claude -p "…"  # loads the Claude plugin
+```
+
+Use `--agent <name>` only when you want an explicit override; explicit selection
+wins over executable-path inference.
+
 **Claude Code** — session-only plugin via the native `--plugin-dir` flag:
 
 ```text
-ccc-agent run --agent claude -- claude -p "…"
+ccc-agent run -- claude -p "…"
   → claude --plugin-dir /ccc-agent/plugins/claude-ccc-containment -p "…"
 ```
 

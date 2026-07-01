@@ -26,6 +26,8 @@ include-package-data = true
     "assets/shims/*.sh",
     "assets/scripts/*.sh",
     "assets/plugins/**/*.json",
+    "assets/plugins/claude-ccc-containment/.claude-plugin/*.json",
+    "assets/plugins/codex-ccc-containment/.codex-plugin/*.json",
     "assets/plugins/**/*.sh",
     "assets/plugins/**/*.yaml",
     "assets/plugins/**/*.py",

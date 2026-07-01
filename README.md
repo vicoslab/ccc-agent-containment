@@ -161,8 +161,16 @@ loads CCC hooks through each agent's **native plugin mechanism**: it bind-mounts
 the matching read-only plugin (`ccc_agent/assets/plugins/…`) into the sandbox,
 adds Claude's `--plugin-dir`, drops the Codex plugin at the in-sandbox Codex
 plugin path, and sets Hermes' `HERMES_BUNDLED_PLUGINS`. Direct, uncontained
-`codex`/`claude`/`hermes` runs load none of this. Disable injection with
-`--no-agent-plugins` (alias `--no-hooks`).
+`codex`/`claude`/`hermes` runs load none of this. By default `ccc-agent run`
+infers the plugin from the command executable basename, including absolute paths.
+For example, these load the matching plugin:
+
+- `ccc-agent run -- codex exec ...`
+- `ccc-agent run -- /path/to/claude -p ...`
+
+Use `--agent <name>` only for an explicit override; explicit selection wins over
+executable-path inference.
+Disable injection with `--no-agent-plugins` (alias `--no-hooks`).
 
 The plugins live under the installed package (`ccc_agent/assets/plugins/…`),
 which is under `/usr` for a system install and therefore exposed read-only

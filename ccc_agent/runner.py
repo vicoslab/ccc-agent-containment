@@ -201,13 +201,27 @@ def _optional_ro_bind(entry):
     return (resolved_src, dest)
 
 
-def _agent_plugin_names(config):
-    """Agent identities eligible for confined-only plugin injection."""
+def _agent_token(value):
+    """Normalize an agent kind or executable path to a plugin lookup token."""
+    if not value:
+        return ""
+    return os.path.basename(str(value)).lower()
+
+
+def _plugin_key_for_token(config, token):
+    """Return the configured plugin key matching token, preserving key spelling."""
+    token = (token or "").lower()
+    for agent in config.agent_plugins:
+        if agent.lower() == token:
+            return agent
+    return None
+
+
+def _inferred_agent_plugin_names(config):
+    """Agent plugin candidates inferred from the executable path only."""
     names = set()
-    if config.agent_kind:
-        names.add(os.path.basename(str(config.agent_kind)).lower())
     if config.agent_command:
-        names.add(os.path.basename(str(config.agent_command[0])).lower())
+        names.add(_agent_token(config.agent_command[0]))
     return names
 
 
@@ -220,17 +234,33 @@ def _matched_agent_plugin(config):
     disables plugins/hooks, so per-turn injection would be a silent no-op).
     Direct, uncontained codex/claude/hermes runs never reach here -- the
     launcher only injects for a command it identified as that agent.
+
+    Explicit agent selection (``--agent codex``) wins over the executable
+    basename.  If no configured plugin matches that explicit kind,
+    fall back to basename inference so existing descriptive labels still work.
     """
-    names = _agent_plugin_names(config)
     if "--bare" in config.agent_command:
         return None
-    for agent, spec in sorted(config.agent_plugins.items()):
-        if agent.lower() not in names or not isinstance(spec, dict):
-            continue
+
+    def validated(agent):
+        spec = config.agent_plugins.get(agent)
+        if not isinstance(spec, dict):
+            return None
         src = spec.get("src")
         if not src or not os.path.isdir(os.path.realpath(src)):
             return None  # missing trusted asset: degrade to session-end review
         return spec
+
+    explicit_kind = _agent_token(config.agent_kind)
+    if explicit_kind and explicit_kind != "command":
+        explicit_agent = _plugin_key_for_token(config, explicit_kind)
+        if explicit_agent:
+            return validated(explicit_agent)
+
+    names = _inferred_agent_plugin_names(config)
+    for agent in sorted(config.agent_plugins):
+        if agent.lower() in names:
+            return validated(agent)
     return None
 
 
