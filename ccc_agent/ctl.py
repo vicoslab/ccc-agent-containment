@@ -6,12 +6,14 @@ Commit authority stays here, in trusted supervisor code, behind explicit
 operator commands (or the runner's policy decision).
 """
 
+import calendar
 import difflib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 
 from .policy import PolicyConfig, classify, filter_ignored
 from .runner import finalize_session
@@ -22,6 +24,19 @@ from .session import TERMINAL_STATES
 CHECK_ALLOW = "allow"          # change set clean: finish normally
 CHECK_REPAIR = "repair"        # dirty, budget left: agent should revert
 CHECK_EXHAUSTED = "exhausted"  # dirty, budget spent: defer to human review
+
+# States whose BranchFS branches should already be closed/discarded. Failed and
+# pending-review sessions are deliberately kept for manual recovery/review.
+CLEANUP_STATES = ("auto-committed", "committed", "aborted")
+
+
+def _utc_seconds(stamp):
+    if not stamp:
+        return None
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        return None
 
 
 class ControlError(Exception):
@@ -105,6 +120,48 @@ class Controller(object):
                       % (session.session_id, session.state,
                          session.agent_kind, session.created_at))
         return sessions
+
+    def cleanup(self, older_than_days=30, dry_run=False, out=None, now=None):
+        """Remove old closed session bundles from the session state dir."""
+        out = out or sys.stdout
+        try:
+            older_than_days = int(older_than_days)
+        except (TypeError, ValueError):
+            raise ControlError("cleanup --older-than must be a non-negative day count")
+        if older_than_days < 0:
+            raise ControlError("cleanup --older-than must be a non-negative day count")
+
+        cutoff = (time.time() if now is None else now) - older_than_days * 86400
+        matched = []
+        skipped = []
+        verb = "would remove" if dry_run else "removed"
+        for session in self.store.list():
+            if session.state not in CLEANUP_STATES:
+                continue
+            stamp = session.finished_at or session.created_at
+            seconds = _utc_seconds(stamp)
+            if seconds is None or seconds > cutoff:
+                continue
+            active_mounts = [root.mount for root in session.protected_roots.values()
+                             if self._mount_still_active(root)]
+            if active_mounts:
+                skipped.append(session.session_id)
+                out.write("%s: skipped (active mount: %s)\n"
+                          % (session.session_id, ", ".join(active_mounts)))
+                continue
+            if not dry_run:
+                try:
+                    self.store.remove(session.session_id)
+                except (OSError, ValueError) as exc:
+                    raise ControlError("could not remove session %s: %s"
+                                       % (session.session_id, exc))
+            matched.append(session.session_id)
+            out.write("%s: %s\n" % (session.session_id, verb))
+        out.write("%s %d old session(s)" % (verb, len(matched)))
+        if skipped:
+            out.write("; skipped %d active session(s)" % len(skipped))
+        out.write("\n")
+        return matched
 
     def show(self, session_id, out=None):
         out = out or sys.stdout

@@ -8,6 +8,7 @@ supervisor stays stdlib-only; the schema mirrors the accepted design doc.
 
 import json
 import os
+import shutil
 import time
 import uuid
 
@@ -217,6 +218,14 @@ class SessionStore(object):
         return os.path.join(self.state_dir, "sessions", session_id,
                             "session.json")
 
+    def _safe_child_path(self, *parts):
+        root = os.path.abspath(self.state_dir)
+        path = os.path.abspath(os.path.join(root, *parts))
+        if path == root or not path.startswith(root + os.sep):
+            raise ValueError("refusing to remove path outside state dir: %s"
+                             % path)
+        return path
+
     # -- lifecycle ---------------------------------------------------------
     def create(self, owner, agent_kind, agent_command, workspace, policy,
                protected_roots, completion="process-exit", session_id=None):
@@ -281,3 +290,31 @@ class SessionStore(object):
                 except (KeyError, ValueError):
                     continue
         return sessions
+
+    def remove(self, session_id):
+        """Remove a session's non-store artifacts from the state directory.
+
+        This deletes the current per-session bundle layout and any matching
+        legacy type-first artifacts. BranchFS stores live outside the session
+        bundle and are intentionally not traversed here.
+        """
+        if (not session_id or os.path.basename(session_id) != session_id or
+                session_id in (".", "..")):
+            raise ValueError("unsafe session id: %r" % session_id)
+        paths = [
+            self._safe_child_path(session_id),
+            self._safe_child_path("sessions", session_id),
+            self._safe_child_path("reviews", session_id),
+            self._safe_child_path("mounts", session_id),
+            self._safe_child_path("control", session_id),
+        ]
+        removed = False
+        for path in paths:
+            if not os.path.exists(path):
+                continue
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+            removed = True
+        return removed

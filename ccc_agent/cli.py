@@ -549,6 +549,16 @@ _BATCH_SESSION_ID_CTL_OPS = (
 )
 
 
+def _nonnegative_days(value):
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be a non-negative day count")
+    if days < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative day count")
+    return days
+
+
 def _add_session_id_arg(parser, multiple=False):
     if multiple:
         parser.add_argument("session_ids", nargs="+", metavar="session-id")
@@ -606,6 +616,14 @@ def main_ctl(argv=None, env=None, prog="ccc-agent"):
     lp = sub.add_parser("list")
     lp.add_argument("session_id", nargs="?", metavar="session-id-prefix",
                     help="optional session id prefix filter")
+    cp = sub.add_parser(
+        "cleanup",
+        help="remove old closed session bundles (default: older than 30 days)")
+    cp.add_argument("--older-than", metavar="DAYS", type=_nonnegative_days,
+                    default=30,
+                    help="remove closed sessions older than DAYS (default: 30)")
+    cp.add_argument("--dry-run", action="store_true",
+                    help="show what would be removed without deleting")
     for name in _SESSION_ID_CTL_OPS:
         p = sub.add_parser(name)
         _add_session_id_arg(p, multiple=name in _BATCH_SESSION_ID_CTL_OPS)
@@ -647,6 +665,9 @@ def main_ctl(argv=None, env=None, prog="ccc-agent"):
     try:
         if args.cmd == "list":
             controller.list(getattr(args, "session_id", None))
+        elif args.cmd == "cleanup":
+            controller.cleanup(older_than_days=args.older_than,
+                               dry_run=args.dry_run)
         elif args.cmd == "show":
             controller.show(args.session_id)
         elif args.cmd == "status":
@@ -693,7 +714,7 @@ def main_softsandbox(argv=None, env=None):
 
 
 _CTL_OPS = (set(_SESSION_ID_CTL_OPS) | {
-    "list", "diff", "review", "finalize-turn", "approve-turn",
+    "list", "cleanup", "diff", "review", "finalize-turn", "approve-turn",
 })
 _SESSION_ID_COMPLETION_OPS = (
     set(_SESSION_ID_CTL_OPS) | {"diff", "review", "list"}
@@ -704,7 +725,9 @@ _MAIN_OPS = tuple(sorted(_CTL_OPS | {
 }))
 _TOP_LEVEL_OPTIONS = ("--config", "--version", "--help")
 _GLOBAL_VALUE_OPTIONS = frozenset(("--config",))
+_CLEANUP_VALUE_OPTIONS = frozenset(("--older-than",))
 _REVIEW_VALUE_OPTIONS = frozenset(("--commit", "--apply-patch"))
+_CLEANUP_OPTIONS = ("--older-than", "--dry-run", "--config", "--help")
 _REVIEW_OPTIONS = (
     "--accept", "--reject", "--commit", "--emit-patch", "--apply-patch",
     "--config", "--help",
@@ -784,6 +807,8 @@ def _completion_config_path(tokens, cword):
 def _value_options_for_completion(op):
     values = set()
     values.update(_GLOBAL_VALUE_OPTIONS)
+    if op == "cleanup":
+        values.update(_CLEANUP_VALUE_OPTIONS)
     if op == "review":
         values.update(_REVIEW_VALUE_OPTIONS)
     return values
@@ -812,6 +837,8 @@ def _positionals_before_completion_token(tokens, cmd_idx, cword, op):
 
 
 def _options_for_completion(op):
+    if op == "cleanup":
+        return _CLEANUP_OPTIONS
     if op == "review":
         return _REVIEW_OPTIONS
     if op in _CTL_OPS or op in ("run", "launch", "setup", "softsandbox",
@@ -908,11 +935,12 @@ def _print_main_help(stream=None):
         "  completion       print shell completion code (bash, zsh, fish)\n"
         "  softsandbox      diagnostic non-FUSE soft sandbox helper\n\n"
         "Session/control ops:\n"
-        "  list, show, status, diff, review, commit, abort, thaw, finish\n"
+        "  list, cleanup, show, status, diff, review, commit, abort, thaw, finish\n"
         "  finish-turn, check-before-final, finalize-turn, approve-turn\n\n"
         "Examples:\n"
         "  ccc-agent run --workspace /home/$USER/project -- codex exec 'fix bug'\n"
         "  ccc-agent list\n"
+        "  ccc-agent cleanup --older-than 30 --dry-run\n"
         "  ccc-agent review <session> --accept\n"
         "  ccc-agent setup --system --enable-shims\n")
 

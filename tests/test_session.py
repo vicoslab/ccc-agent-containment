@@ -161,6 +161,29 @@ class TestStore(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(self.tmp.name,
                                                          old_top)))
 
+    def test_remove_deletes_session_bundle_and_legacy_artifacts(self):
+        session = make_session(self.store)
+        sid = session.session_id
+        legacy_paths = [
+            os.path.join(self.tmp.name, "sessions", sid),
+            os.path.join(self.tmp.name, "reviews", sid),
+            os.path.join(self.tmp.name, "mounts", sid),
+            os.path.join(self.tmp.name, "control", sid),
+        ]
+        for path in legacy_paths:
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "artifact"), "w") as fh:
+                fh.write("legacy\n")
+
+        removed = self.store.remove(sid)
+
+        self.assertTrue(removed)
+        self.assertFalse(os.path.exists(self.store.bundle_dir(sid)))
+        for path in legacy_paths:
+            self.assertFalse(os.path.exists(path))
+        with self.assertRaises(KeyError):
+            self.store.load(sid)
+
 
 if __name__ == "__main__":
     unittest.main()

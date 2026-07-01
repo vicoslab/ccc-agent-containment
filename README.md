@@ -69,7 +69,13 @@ ccc-agent review <session> --emit-patch > c.patch  # line-by-line: prune hunksâ€
 ccc-agent review <session> --apply-patch c.patch   # â€¦then apply
 ccc-agent commit <session> [<session> ...]  # commit one or more pending/frozen sessions
 ccc-agent abort <session> [<session> ...]   # discard one or more sessions
+ccc-agent cleanup --older-than 30           # remove old closed session bundles
+ccc-agent cleanup --older-than 30 --dry-run # preview without deleting
 ```
+
+`cleanup` only removes closed session bundles (`auto-committed`, `committed`,
+`aborted`) older than the requested age. Pending review, running, and failed
+sessions stay visible for human review/recovery.
 
 Or directly via the BranchFS CLI (branch name == session id):
 
@@ -124,7 +130,7 @@ remain readable through the shared agent-state bind.
 | Piece | Role |
 |---|---|
 | `bin/ccc-agent` / `ccc-agent run` | trusted launcher: session + branch bundle + agent/shell + finalize; also used by transparent shims (workspace = `$PWD`) |
-| `ccc-agent list/show/diff/...` | operator + in-sandbox control ops: list/show/diff/commit/abort/review/finalize-turn/approve-turn |
+| `ccc-agent list/show/diff/...` | operator + in-sandbox control ops: list/show/diff/commit/abort/review/finalize-turn/approve-turn; `cleanup` prunes old closed session bundles |
 | `ccc-agent setup` | installer/wiring op: config, plugin entries, optional transparent PATH shims |
 | `ccc_agent/` | stdlib-only Python: session store, policy engine, BranchFS driver, bwrap assembler, control socket + per-turn handler |
 | `shims/ccc-agent-shim.sh` | transparent `codex`/`claude`/... PATH shims |
@@ -184,7 +190,8 @@ only as a debug / one-off fallback.
 The completion hook reads the configured session store and completes optional
 `session-id` prefixes for `list`, plus required `session-id` arguments for
 `show`, `status`, `diff`, `review`, `commit`, `abort`, `thaw`, `finish`,
-`finish-turn`, and `check-before-final`.
+`finish-turn`, and `check-before-final`. It also completes `cleanup` options
+such as `--older-than` and `--dry-run`.
 
 `ccc-agent setup` does what pip can't: writes `config.json` with the
 `agent_plugins` map, makes the bundled plugin hook scripts executable, and

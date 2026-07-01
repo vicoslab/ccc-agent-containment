@@ -654,6 +654,24 @@ class TestMainCtl(unittest.TestCase):
                 fh.write("x\n")
         return session_id
 
+    def make_auto_committed_session(self, relpath="closed.txt"):
+        before = set(self.h.sessions())
+        self.assertEqual(main_run([
+            "--config", self.h.config_path,
+            "--workspace", "/storage/user/Projects/proj-a",
+            "--", "sh", "-c", "printf 'x\\n' > %s" % relpath,
+        ], env={}), 0)
+        created = sorted(set(self.h.sessions()) - before)
+        self.assertEqual(len(created), 1)
+        return created[0]
+
+    def set_session_time(self, session_id, timestamp):
+        store = self.store()
+        session = store.load(session_id)
+        session.created_at = timestamp
+        session.finished_at = timestamp
+        store.save(session)
+
     def test_list_and_show_roundtrip(self):
         main_run([
             "--config", self.h.config_path,
@@ -766,6 +784,43 @@ class TestMainCtl(unittest.TestCase):
             self.assertTrue(any(e["event"] == "turn-finished"
                                 for e in self.store().load(sid).events))
 
+    def test_cleanup_removes_only_old_closed_session_bundles(self):
+        old_closed = self.make_auto_committed_session("old-closed.txt")
+        old_pending = self.make_pending_session("old-pending.txt")
+        recent_closed = self.make_auto_committed_session("recent-closed.txt")
+        self.set_session_time(old_closed, "2000-01-01T00:00:00Z")
+        self.set_session_time(old_pending, "2000-01-01T00:00:00Z")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main_ctl(["--config", self.h.config_path, "cleanup",
+                             "--older-than", "7"], env={})
+
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("%s: removed" % old_closed, text)
+        self.assertIn("removed 1 old session", text)
+        self.assertNotIn(old_pending, text)
+        with self.assertRaises(KeyError):
+            self.store().load(old_closed)
+        self.assertFalse(os.path.exists(self.store().bundle_dir(old_closed)))
+        self.assertEqual(self.store().load(old_pending).state, "pending-review")
+        self.assertEqual(self.store().load(recent_closed).state,
+                         "auto-committed")
+
+    def test_cleanup_dry_run_keeps_matching_sessions(self):
+        old_closed = self.make_auto_committed_session("dry-run-closed.txt")
+        self.set_session_time(old_closed, "2000-01-01T00:00:00Z")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main_ctl(["--config", self.h.config_path, "cleanup",
+                             "--older-than", "7", "--dry-run"], env={})
+
+        self.assertEqual(code, 0)
+        self.assertIn("%s: would remove" % old_closed, out.getvalue())
+        self.assertEqual(self.store().load(old_closed).state, "auto-committed")
+
     def test_ctl_error_returns_nonzero(self):
         self.assertEqual(
             main_ctl(["--config", self.h.config_path, "commit",
@@ -845,6 +900,13 @@ class TestShellCompletion(unittest.TestCase):
     def test_top_level_completion_lists_matching_ops(self):
         matches = self.complete(["ccc-agent", "st"])
         self.assertIn("status", matches)
+        self.assertIn("cleanup", self.complete(["ccc-agent", "cl"]))
+
+    def test_cleanup_completion_lists_options_not_session_ids(self):
+        matches = self.complete(["ccc-agent", "cleanup", "--"])
+        self.assertIn("--older-than", matches)
+        self.assertIn("--dry-run", matches)
+        self.assertNotIn("agent-alpha", matches)
 
     def test_public_completion_command_prints_bash_hook(self):
         out = io.StringIO()
