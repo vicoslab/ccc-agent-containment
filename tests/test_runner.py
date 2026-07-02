@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from ccc_agent.branchfs import FakeBranchFS
+from ccc_agent.branchfs import FakeBranchFS, StatusReport, StatusWarning
 from ccc_agent.paths import AliasMap
 from ccc_agent.runner import RootSpec, RunnerConfig, resume_session, run_session
 from ccc_agent.session import SessionStore
@@ -116,6 +116,44 @@ class TestRunSession(unittest.TestCase):
         self.assertEqual(session.state, "auto-committed")
         self.assertTrue(any("no changes" in (e.get("detail") or "")
                             for e in session.events))
+
+    def test_branchfs_status_warnings_force_pending_review(self):
+        class WarningStatusBranchFS(FakeBranchFS):
+            def status_report(self, root):
+                base = FakeBranchFS.status_report(self, root)
+                return StatusReport(
+                    changes=base.changes,
+                    warnings=[StatusWarning(
+                        path="/storage/user/Projects/proj-a/unreadable",
+                        message="unreadable delta directory; commit may fail",
+                        root=root.name,
+                    )],
+                )
+
+        self.h.backend = WarningStatusBranchFS()
+        session = run_session(self.h.config(
+            ["sh", "-c", "echo done > result.txt"]))
+
+        self.assertEqual(session.state, "pending-review")
+        self.assertFalse(os.path.exists(os.path.join(
+            self.h.base, "Projects", "proj-a", "result.txt")))
+        review = self.h.store.review_dir(session.session_id)
+        with open(os.path.join(review, "warnings.storage_user.json")) as fh:
+            warnings = json.load(fh)
+        self.assertEqual(warnings, [{
+            "path": "/storage/user/Projects/proj-a/unreadable",
+            "message": "unreadable delta directory; commit may fail",
+            "root": "storage_user",
+        }])
+        with open(os.path.join(review, "policy-decision.json")) as fh:
+            decision = json.load(fh)
+        self.assertEqual(decision["decision"], "pending-review")
+        self.assertTrue(any("BranchFS status warning" in reason
+                            for reason in decision["reasons"]))
+        with open(os.path.join(review, "summary.md")) as fh:
+            summary = fh.read()
+        self.assertIn("## BranchFS status warnings", summary)
+        self.assertIn("commit may fail", summary)
 
     def test_shell_history_temp_noise_is_discarded_as_no_change(self):
         session = run_session(

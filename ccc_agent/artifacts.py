@@ -17,8 +17,9 @@ def _write_json(path, data):
     os.replace(tmp, path)
 
 
-def write_review(store, session, changes_by_root, decision):
-    """Write session.json, per-root status JSON, policy decision, summary.md."""
+def write_review(store, session, changes_by_root, decision, warnings_by_root=None):
+    """Write session.json, per-root status/warning JSON, policy decision, summary.md."""
+    warnings_by_root = warnings_by_root or {}
     review = store.review_dir(session.session_id)
     os.makedirs(review, exist_ok=True)
 
@@ -26,15 +27,20 @@ def write_review(store, session, changes_by_root, decision):
     for root_name, changes in changes_by_root.items():
         _write_json(os.path.join(review, "status.%s.json" % root_name),
                     [c.to_dict() for c in changes])
+    for root_name, warnings in warnings_by_root.items():
+        _write_json(os.path.join(review, "warnings.%s.json" % root_name),
+                    [w.to_dict() for w in warnings])
     _write_json(os.path.join(review, "policy-decision.json"),
                 decision.to_dict())
 
     with open(os.path.join(review, "summary.md"), "w") as fh:
-        fh.write(render_summary(session, changes_by_root, decision))
+        fh.write(render_summary(session, changes_by_root, decision,
+                                warnings_by_root=warnings_by_root))
     return review
 
 
-def render_summary(session, changes_by_root, decision):
+def render_summary(session, changes_by_root, decision, warnings_by_root=None):
+    warnings_by_root = warnings_by_root or {}
     lines = []
     out = lines.append
     out("# Agent session %s" % session.session_id)
@@ -77,6 +83,18 @@ def render_summary(session, changes_by_root, decision):
         out("")
         for match in decision.deny_matches:
             out("- `%s` (rule `%s`)" % (match.path, match.pattern))
+        out("")
+    warning_total = sum(len(warnings)
+                        for warnings in warnings_by_root.values())
+    if warning_total:
+        out("## BranchFS status warnings")
+        out("")
+        out("These warnings mean status may be incomplete or commit may fail; review before committing.")
+        out("")
+        for root_name, warnings in sorted(warnings_by_root.items()):
+            for warning in warnings:
+                out("- `%s` `%s`: %s" % (root_name, warning.path,
+                                           warning.message))
         out("")
     out("## Changed paths")
     out("")
