@@ -136,11 +136,12 @@ class RunnerConfig(object):
         # overlay). Each value is a spec: {src, sandbox_path, argv?, setenv?,
         # ensure_dirs?}. Only the spec matching the contained agent is injected.
         self.agent_plugins = dict(agent_plugins or {})
-        # By default the agent tools' own homes are shared system state, not
-        # BranchFS-protected project data.  They are bound rw over the branch
-        # view so Codex/Claude/Hermes own their config/session/cache concurrency.
-        # --protect-agent-state/config protect_agent_state omits these binds for
-        # users who intentionally want agent state inside BranchFS review.
+        # By default the agent tools' own runtime/config state is shared system
+        # state, not BranchFS-protected project data.  Paths are bound rw over
+        # the branch view so Codex/Claude/Hermes own their config/session/cache
+        # concurrency (including Claude's ~/.claude.json and .local/.cache
+        # runtime dirs).  --protect-agent-state/config protect_agent_state omits
+        # these binds for users who intentionally want agent state in review.
         self.agent_state_binds = (list(agent_state_binds)
                                   if agent_state_binds is not None
                                   else _default_agent_state_binds(owner))
@@ -179,12 +180,22 @@ def _primary_root(session, alias_map):
 # symlinks, not bound as dirs.
 BWRAP_RO_DIRS = ("/usr", "/etc", "/opt")
 BWRAP_USRMERGE_DIRS = ("/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32")
-AGENT_STATE_DIRS = (".codex", ".claude", ".hermes")
+AGENT_STATE_DIRS = (
+    ".codex", ".claude", ".hermes",
+    ".local/share/claude", ".local/state/claude",
+    ".cache/claude-cli-nodejs",
+)
+AGENT_STATE_FILES = (".claude.json",)
+AGENT_STATE_PATHS = AGENT_STATE_DIRS + AGENT_STATE_FILES
+CLAUDE_RUNTIME_STATE_PATHS = (
+    ".claude", ".claude.json", ".local/share/claude",
+    ".local/state/claude", ".cache/claude-cli-nodejs",
+)
 
 
 def _default_agent_state_binds(owner):
     home = "/home/%s" % owner
-    return [os.path.join(home, name) for name in AGENT_STATE_DIRS]
+    return [os.path.join(home, name) for name in AGENT_STATE_PATHS]
 
 
 def _bind_parts(entry):
@@ -229,10 +240,14 @@ def _optional_ro_bind(entry):
     return (resolved_src, dest)
 
 
-def _optional_rw_dir_bind(entry):
-    """Return a safe optional read-write directory bind, or None to skip it.
+def _optional_rw_agent_state_bind(entry):
+    """Return a safe optional read-write agent-state bind, or None.
 
-    Shared agent state dirs are mounted after the BranchFS home/storage view.
+    Shared agent state is mounted after the BranchFS home/storage view.  Most
+    entries are directories, but Claude Code also keeps a top-level
+    ``~/.claude.json`` file.  Bind existing directories *and* files; skip missing
+    optional paths so bwrap is never handed a source that would make launch fail.
+
     Like read-only optional binds, a destination such as ``~/.claude`` can be a
     symlink to a storage path.  Passing the symlink itself to bwrap lets bwrap
     resolve it inside the new root, after /home and /storage have been overlaid,
@@ -243,7 +258,7 @@ def _optional_rw_dir_bind(entry):
     if not src or not dest or not src.startswith("/") or not dest.startswith("/"):
         return None
     resolved_src = os.path.realpath(src)
-    if not os.path.isdir(resolved_src):
+    if not (os.path.isdir(resolved_src) or os.path.isfile(resolved_src)):
         return None
     resolved_dest = os.path.realpath(dest)
     if os.path.normpath(resolved_dest) != os.path.normpath(dest):
@@ -408,9 +423,52 @@ def _infra_ignore_paths_for(path, session, config):
     return [canonical]
 
 
+def _canonical_protected_path(path, session, config):
+    """Return canonical path if it is inside a protected root, else None."""
+    if not path or not str(path).startswith("/"):
+        return None
+    try:
+        canonical = config.alias_map.canonicalize(str(path))
+    except ValueError:
+        return None
+    for root in session.protected_roots.values():
+        visible = config.alias_map.canonicalize(root.visible)
+        if is_within(canonical, visible) and canonical != visible:
+            return canonical
+    return None
+
+
+def _is_claude_agent(config):
+    """Best-effort detection of a contained Claude Code invocation."""
+    if _agent_token(config.agent_kind) == "claude":
+        return True
+    return "claude" in _inferred_agent_plugin_names(config)
+
+
+def _add_claude_runtime_state_ignores(session, config, ignore):
+    """Drop narrowly-known Claude Code runtime files from BranchFS review.
+
+    Optional shared binds are skipped when the source is absent.  If Claude then
+    creates the path inside the BranchFS home view during this run, it is still
+    runtime/config noise rather than a user deliverable.  Add only exact Claude
+    runtime paths (not broad ``.local`` or ``.cache`` parents) and only in the
+    default shared-state mode; ``--protect-agent-state`` intentionally leaves
+    agent state reviewable.
+    """
+    if config.protect_agent_state or not _is_claude_agent(config):
+        return
+    home = "/home/%s" % config.owner
+    for relpath in CLAUDE_RUNTIME_STATE_PATHS:
+        canonical = _canonical_protected_path(os.path.join(home, relpath),
+                                             session, config)
+        if canonical and canonical not in ignore:
+            ignore.append(canonical)
+
+
 def _add_session_infra_ignores(session, config):
     """Ignore ccc-agent-owned bind/plugin/mask targets inside branch views."""
     ignore = session.policy.setdefault("ignore_patterns", [])
+    _add_claude_runtime_state_ignores(session, config, ignore)
 
     def add(path):
         for canonical in _infra_ignore_paths_for(path, session, config):
@@ -442,10 +500,19 @@ def _ensure_shared_agent_state_dirs(config):
     if config.protect_agent_state or not config.ensure_agent_state_dirs:
         return
     for entry in config.agent_state_binds:
-        src, _dest = _bind_parts(entry)
+        src, dest = _bind_parts(entry)
         if not src or not str(src).startswith("/"):
             continue
-        os.makedirs(os.path.realpath(src), mode=0o700, exist_ok=True)
+        resolved = os.path.realpath(src)
+        if os.path.exists(resolved):
+            # Existing files such as ~/.claude.json are shared binds too, but
+            # ensure_agent_state_dirs must never turn them into directories.
+            continue
+        names = (os.path.basename(os.path.normpath(src)),
+                 os.path.basename(os.path.normpath(dest)))
+        if any(name in AGENT_STATE_FILES for name in names):
+            continue
+        os.makedirs(resolved, mode=0o700, exist_ok=True)
 
 
 def _agent_state_symlink_target_dir(path):
@@ -457,19 +524,23 @@ def _agent_state_symlink_target_dir(path):
     bwrap, following that symlink reaches the protected ``/storage`` view unless
     the target agent-state directory is also rebound as shared runtime state.
 
-    Keep this intentionally narrow: only directories named like known agent-state
-    homes (``.codex``, ``.claude``, ``.hermes``) are auto-bound.  A symlink from
-    an agent state dir to an arbitrary project/data path should remain protected.
+    Keep this intentionally narrow: only known agent-state directory suffixes
+    (``.codex``, ``.claude``, ``.hermes``, and Claude's ``.local``/cache dirs)
+    are auto-bound.  A symlink from an agent state dir to an arbitrary
+    project/data path should remain protected.
     """
     if not path or not str(path).startswith("/"):
         return None
-    target = os.path.realpath(path)
-    parts = target.strip(os.sep).split(os.sep)
-    current = os.sep
-    for part in parts:
-        current = os.path.join(current, part)
-        if part in AGENT_STATE_DIRS:
-            return current if os.path.isdir(current) else None
+    normalized = os.path.normpath(os.path.realpath(path))
+    for relpath in sorted(AGENT_STATE_DIRS, key=len, reverse=True):
+        marker = os.sep + relpath.replace("/", os.sep)
+        start = normalized.find(marker)
+        while start != -1:
+            end = start + len(marker)
+            if end == len(normalized) or normalized[end] == os.sep:
+                candidate = normalized[:end]
+                return candidate if os.path.isdir(candidate) else None
+            start = normalized.find(marker, start + 1)
     return None
 
 
@@ -503,7 +574,7 @@ def _append_shared_agent_state_binds(argv, config):
     if config.protect_agent_state:
         return
     for entry in config.agent_state_binds:
-        bind = _optional_rw_dir_bind(entry)
+        bind = _optional_rw_agent_state_bind(entry)
         if bind is not None:
             argv += ["--bind", bind[0], bind[1]]
     for src, dest in _shared_agent_state_symlink_target_binds(config):
@@ -573,7 +644,8 @@ def _bwrap_command(session, config, control=None):
         argv += ["--bind", root.mount, alias_map.canonicalize(root.visible)]
 
     # Agent-owned state is deliberately outside BranchFS by default: bind the
-    # real shared Codex/Claude/Hermes homes back over the protected home view.
+    # real shared Codex/Claude/Hermes runtime paths back over the protected home
+    # view (including Claude's top-level JSON file and .local/.cache dirs).
     # Plugins/hooks are mounted read-only after this so trusted CCC assets still
     # override any writable user/plugin state.
     _append_shared_agent_state_binds(argv, config)
