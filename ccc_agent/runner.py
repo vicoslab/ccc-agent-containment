@@ -20,6 +20,7 @@ import shutil
 import subprocess
 
 from . import artifacts
+from .branchfs import StatusReport
 from .control import ControlServer
 from .paths import is_within, normalize
 from .policy import (ABORT, AUTO_COMMIT, NO_CHANGES, PENDING_REVIEW,
@@ -679,9 +680,19 @@ def _fail(store, session, detail):
     store.save(session)
 
 
+def collect_status_reports(session, backend):
+    reports = {}
+    for name, root in sorted(session.protected_roots.items()):
+        if hasattr(backend, "status_report"):
+            reports[name] = backend.status_report(root)
+        else:
+            reports[name] = StatusReport(changes=backend.status(root), warnings=[])
+    return reports
+
+
 def collect_status(session, backend):
-    return {name: backend.status(root)
-            for name, root in sorted(session.protected_roots.items())}
+    return {name: report.changes
+            for name, report in collect_status_reports(session, backend).items()}
 
 
 def apply_change_from_store(root, change, alias_map):
@@ -720,13 +731,28 @@ def finalize_session(session, store, backend, alias_map):
     store.save(session)
 
     policy_config = PolicyConfig.from_dict(session.policy)
-    changes_by_root = {name: filter_ignored(changes, policy_config, alias_map)
-                       for name, changes in collect_status(session,
-                                                           backend).items()}
+    status_reports = collect_status_reports(session, backend)
+    changes_by_root = {name: filter_ignored(report.changes, policy_config,
+                                            alias_map)
+                       for name, report in status_reports.items()}
+    warnings_by_root = {name: list(report.warnings)
+                        for name, report in status_reports.items()
+                        if report.warnings}
     flat_changes = [c for changes in changes_by_root.values()
                     for c in changes]
+    flat_warnings = [w for warnings in warnings_by_root.values()
+                     for w in warnings]
     decision = evaluate(flat_changes, policy_config, alias_map)
-    review = artifacts.write_review(store, session, changes_by_root, decision)
+    if flat_warnings:
+        reason = ("%d BranchFS status warning(s); manual review required "
+                  "because status may be incomplete or commit may fail"
+                  % len(flat_warnings))
+        if reason not in decision.reasons:
+            decision.reasons.append(reason)
+        if decision.decision in (AUTO_COMMIT, NO_CHANGES):
+            decision.decision = PENDING_REVIEW
+    review = artifacts.write_review(store, session, changes_by_root, decision,
+                                    warnings_by_root=warnings_by_root)
     session.add_event("review-artifacts", review)
 
     # Apply the decision against unmounted branches.  The real branchfs binary

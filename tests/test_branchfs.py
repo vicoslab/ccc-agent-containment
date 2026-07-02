@@ -207,6 +207,28 @@ class TestBranchfsCli(unittest.TestCase):
         self.assertEqual(leaf.op, "A")
         self.assertNotIn("/storage/user/Projects/proj-a/sub", by_path)
 
+    def test_status_report_preserves_branchfs_warnings(self):
+        status = dict(STATUS_JSON)
+        status["warnings"] = [
+            {"path": "/Projects/proj-a/unreadable",
+             "message": "unreadable delta directory: Permission denied; commit may fail"},
+        ]
+        runner = RecordingRunner(outputs={"status": json.dumps(status)})
+        cli = BranchfsCli(run=runner)
+
+        report = cli.status_report(self.root)
+
+        self.assertEqual(len(report.changes), 4)
+        self.assertEqual(len(report.warnings), 1)
+        warning = report.warnings[0]
+        self.assertEqual(warning.path,
+                         "/storage/user/Projects/proj-a/unreadable")
+        self.assertEqual(warning.root, "storage_user")
+        self.assertIn("commit may fail", warning.message)
+        # Existing callers keep receiving just changes.
+        self.assertEqual([c.path for c in cli.status(self.root)],
+                         [c.path for c in report.changes])
+
     def test_failure_raises_with_stderr(self):
         runner = RecordingRunner(fail_on={"freeze"})
         cli = BranchfsCli(run=runner)

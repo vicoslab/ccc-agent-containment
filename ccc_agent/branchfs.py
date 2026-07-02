@@ -27,6 +27,30 @@ class BranchfsError(Exception):
     pass
 
 
+class StatusWarning(object):
+    """One non-fatal BranchFS status warning in agent-visible namespace."""
+
+    __slots__ = ("path", "message", "root")
+
+    def __init__(self, path, message, root=""):
+        self.path = path
+        self.message = message
+        self.root = root
+
+    def to_dict(self):
+        return {"path": self.path, "message": self.message, "root": self.root}
+
+
+class StatusReport(object):
+    """Complete BranchFS status payload: changes plus non-fatal warnings."""
+
+    __slots__ = ("changes", "warnings")
+
+    def __init__(self, changes=(), warnings=()):
+        self.changes = list(changes)
+        self.warnings = list(warnings)
+
+
 def _branch_dir(root):
     return os.path.join(root.store, "branches", root.branch)
 
@@ -133,6 +157,26 @@ def _changes_from_status(data, root):
     return changes
 
 
+def _visible_warning_path(root, relpath):
+    relpath = str(relpath or "").lstrip("/")
+    if not relpath:
+        return root.visible.rstrip("/")
+    return root.visible.rstrip("/") + "/" + relpath
+
+
+def _warnings_from_status(data, root):
+    warnings = []
+    for warning in data.get("warnings", ()) or ():
+        if not isinstance(warning, dict):
+            continue
+        warnings.append(StatusWarning(
+            path=_visible_warning_path(root, warning.get("path", "")),
+            message=str(warning.get("message", "")),
+            root=root.name,
+        ))
+    return warnings
+
+
 class BranchfsCli(object):
     """Drives the branchfs CLI; one daemon per protected root (per store)."""
 
@@ -225,7 +269,7 @@ class BranchfsCli(object):
         self.start_daemon(root)
         self._invoke("thaw", root.branch, "--storage", root.store)
 
-    def status(self, root):
+    def status_report(self, root):
         self.start_daemon(root)
         out = self._invoke("status", root.branch, "--storage", root.store,
                            "--json")
@@ -233,7 +277,11 @@ class BranchfsCli(object):
             data = json.loads(out)
         except ValueError as exc:
             raise BranchfsError("unparseable status output: %s" % exc)
-        return _changes_from_status(data, root)
+        return StatusReport(changes=_changes_from_status(data, root),
+                            warnings=_warnings_from_status(data, root))
+
+    def status(self, root):
+        return self.status_report(root).changes
 
     def commit(self, root):
         self.start_daemon(root)
@@ -309,7 +357,7 @@ class FakeBranchFS(object):
     def thaw(self, root):
         self._state[self._key(root)] = "open"
 
-    def status(self, root):
+    def status_report(self, root):
         files = self._files_dir(root)
         diff = []
         if os.path.isdir(files):
@@ -322,7 +370,11 @@ class FakeBranchFS(object):
         for rel in sorted(self._deletes.get(self._key(root), ())):
             diff.append({"op": "delete", "path": rel, "kind": "tombstone",
                          "bytes": 0})
-        return _changes_from_status({"diff": diff}, root)
+        return StatusReport(changes=_changes_from_status({"diff": diff}, root),
+                            warnings=[])
+
+    def status(self, root):
+        return self.status_report(root).changes
 
     def _apply_to_base(self, root):
         files = self._files_dir(root)
