@@ -37,6 +37,10 @@ ENV_CONTROL_TOKEN = "CCC_AGENT_CONTROL_TOKEN"
 SANDBOX_CONTROL_SOCK = "/run/ccc-agent/control.sock"
 
 
+class ResumeError(Exception):
+    """Raised when an existing session cannot be resumed safely."""
+
+
 class RootSpec(object):
     """Template for one protected root; branch/mount are filled per session."""
 
@@ -778,63 +782,25 @@ def _unmount_all(session, backend):
             pass  # unmount is cleanup; never mask the session outcome
 
 
-def run_session(config, env=None, before_finalize=None):
-    """Run one contained agent session to its final state.
+def _command_detail(command):
+    return " ".join(str(part) for part in command)
 
-    ``env`` defaults to ``os.environ``.  If ``CCC_AGENT_SESSION`` is already
-    set, the invocation is nested inside an existing session: reuse it and
-    run the command without creating a new branch bundle.
-    """
-    env = dict(os.environ if env is None else env)
 
-    nested_id = env.get(ENV_SESSION)
-    if nested_id:
+def _active_mounts(session):
+    active = []
+    for root in session.protected_roots.values():
         try:
-            session = config.store.load(nested_id)
-        except KeyError:
-            session = None
-        if session is not None:
-            session.add_event("nested-run", " ".join(config.agent_command))
-            config.store.save(session)
-            subprocess.call(config.agent_command, env=env)
-            return session
+            if os.path.ismount(root.mount):
+                active.append(root.mount)
+        except OSError:
+            pass
+    return active
 
-    session = config.store.create(
-        owner=config.owner,
-        agent_kind=config.agent_kind,
-        agent_command=config.agent_command,
-        workspace=config.workspace,
-        policy=config.policy,
-        protected_roots={},  # filled below, once the session id exists
-        completion=config.completion,
-    )
-    session.protected_roots = {
-        spec.name: spec.materialize(
-            session.session_id,
-            config.store.state_dir,
-            mount_dir=config.store.mount_dir(session.session_id),
-        )
-        for spec in config.roots
-    }
-    _add_session_infra_ignores(session, config)
-    config.store.save(session)
 
+def _run_agent_and_finalize(session, config, env, before_finalize=None,
+                            enter_running=False):
+    """Launch config.agent_command against an already-mounted session."""
     control_server = None
-
-    try:
-        session.transition("mounting")
-        config.store.save(session)
-        _ensure_shared_agent_state_dirs(config)
-        for root in session.protected_roots.values():
-            config.backend.start_daemon(root)
-            config.backend.create_branch(root)
-            config.backend.mount(root, agent=True)
-        session.add_event("mounted-bundle")
-    except Exception as exc:
-        _fail(config.store, session, "mount failed: %s" % exc)
-        _unmount_all(session, config.backend)
-        return session
-
     try:
         cwd = _agent_cwd(session, config.alias_map)
         os.makedirs(cwd, exist_ok=True)
@@ -860,7 +826,8 @@ def run_session(config, env=None, before_finalize=None):
             run_env[ENV_CONTROL_TOKEN] = token
             control = (host_sock, token)
 
-        session.transition("running")
+        if enter_running:
+            session.transition("running")
         config.store.save(session)
         if config.on_session_start is not None:
             config.on_session_start(session)
@@ -896,3 +863,119 @@ def run_session(config, env=None, before_finalize=None):
         _unmount_all(session, config.backend)
 
     return session
+
+
+def run_session(config, env=None, before_finalize=None):
+    """Run one contained agent session to its final state.
+
+    ``env`` defaults to ``os.environ``.  If ``CCC_AGENT_SESSION`` is already
+    set, the invocation is nested inside an existing session: reuse it and
+    run the command without creating a new branch bundle.
+    """
+    env = dict(os.environ if env is None else env)
+
+    nested_id = env.get(ENV_SESSION)
+    if nested_id:
+        try:
+            session = config.store.load(nested_id)
+        except KeyError:
+            session = None
+        if session is not None:
+            session.add_event("nested-run", _command_detail(config.agent_command))
+            config.store.save(session)
+            subprocess.call(config.agent_command, env=env)
+            return session
+
+    session = config.store.create(
+        owner=config.owner,
+        agent_kind=config.agent_kind,
+        agent_command=config.agent_command,
+        workspace=config.workspace,
+        policy=config.policy,
+        protected_roots={},  # filled below, once the session id exists
+        completion=config.completion,
+    )
+    session.protected_roots = {
+        spec.name: spec.materialize(
+            session.session_id,
+            config.store.state_dir,
+            mount_dir=config.store.mount_dir(session.session_id),
+        )
+        for spec in config.roots
+    }
+    _add_session_infra_ignores(session, config)
+    config.store.save(session)
+
+    try:
+        session.transition("mounting")
+        config.store.save(session)
+        _ensure_shared_agent_state_dirs(config)
+        for root in session.protected_roots.values():
+            config.backend.start_daemon(root)
+            config.backend.create_branch(root)
+            config.backend.mount(root, agent=True)
+        session.add_event("mounted-bundle")
+    except Exception as exc:
+        _fail(config.store, session, "mount failed: %s" % exc)
+        _unmount_all(session, config.backend)
+        return session
+
+    return _run_agent_and_finalize(session, config, env,
+                                   before_finalize=before_finalize,
+                                   enter_running=True)
+
+
+def resume_session(session_id, config, env=None, before_finalize=None,
+                   force=False):
+    """Re-mount and continue an existing running session branch.
+
+    This is for crash/reboot recovery: the durable session + BranchFS branch
+    already exist, but the process tree and FUSE mounts disappeared.  Resume
+    deliberately does *not* create a new branch and it preserves the original
+    stored `agent_command`; `config.agent_command` is the command for this
+    invocation only (defaulted by the CLI to the stored command).
+    """
+    env = dict(os.environ if env is None else env)
+    if env.get(ENV_SESSION):
+        raise ResumeError("cannot resume a session from inside another "
+                          "ccc-agent session")
+    try:
+        session = config.store.load(session_id)
+    except KeyError:
+        raise ResumeError("no such session: %s" % session_id)
+    if session.state != "running":
+        raise ResumeError(
+            "cannot resume session %s in state %s (resume expects a running "
+            "session left behind by a crash/reboot)"
+            % (session.session_id, session.state))
+
+    active = _active_mounts(session)
+    if active and not force:
+        raise ResumeError(
+            "refusing to resume session %s because its mount(s) still appear "
+            "active: %s; use --force only after verifying no old agent process "
+            "is still using the session"
+            % (session.session_id, ", ".join(active)))
+
+    session.add_event("resume-command", _command_detail(config.agent_command))
+    if config.agent_kind != session.agent_kind:
+        session.add_event("resume-agent", config.agent_kind)
+    config.store.save(session)
+
+    try:
+        _ensure_shared_agent_state_dirs(config)
+        for root in session.protected_roots.values():
+            config.backend.start_daemon(root)
+            config.backend.mount(root, agent=True)
+        session.add_event("resumed-bundle")
+        config.store.save(session)
+    except Exception as exc:
+        detail = "resume mount failed: %s" % exc
+        session.add_event("error", detail)
+        config.store.save(session)
+        _unmount_all(session, config.backend)
+        raise ResumeError(detail)
+
+    return _run_agent_and_finalize(session, config, env,
+                                   before_finalize=before_finalize,
+                                   enter_running=False)

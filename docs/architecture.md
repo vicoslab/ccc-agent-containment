@@ -45,6 +45,12 @@ created -> mounting -> running -> finalizing -> frozen
 - `ccc-agent run` materializes one branch per protected root (branch name =
   session id), mounts agent views, runs the command with
   `CCC_AGENT_SESSION` set, and finalizes on exit.
+- If a node/container reboots while a session is `running`, `ccc-agent resume
+  <session>` reuses the existing branch bundle, re-mounts the saved roots, runs
+  the stored `agent_command` by default (or a custom command after `--`), and
+  then follows the same process-exit finalization path. Resume does not create a
+  new branch and custom resume commands do not overwrite the stored original
+  exec.
 - Freeze happens **after** completion — and, for harnesses with blocking
   Stop hooks, after the bounded self-repair loop (`check-before-final`) has
   allowed the stop — then `branchfs status --json` per root feeds the policy

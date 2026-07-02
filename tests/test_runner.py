@@ -16,7 +16,7 @@ from unittest import mock
 
 from ccc_agent.branchfs import FakeBranchFS
 from ccc_agent.paths import AliasMap
-from ccc_agent.runner import RootSpec, RunnerConfig, run_session
+from ccc_agent.runner import RootSpec, RunnerConfig, resume_session, run_session
 from ccc_agent.session import SessionStore
 
 
@@ -62,6 +62,29 @@ class TestRunSession(unittest.TestCase):
 
     def tearDown(self):
         self._tmp.cleanup()
+
+    def running_session(self, session_id="agent-resume", command=None,
+                        mode="workspace-auto"):
+        spec = RootSpec(name="storage_user", base=self.h.base,
+                        store=os.path.join(self.h.tmp, "stores",
+                                           "storage_user"),
+                        visible="/storage/user", home_subdir="")
+        root = spec.materialize(session_id, self.h.store.state_dir,
+                                mount_dir=self.h.store.mount_dir(session_id))
+        os.makedirs(os.path.join(root.store, "branches", root.branch, "files"),
+                    exist_ok=True)
+        session = self.h.store.create(
+            owner="domen", agent_kind="codex",
+            agent_command=command or ["sh", "-c", "echo resumed > resumed.txt"],
+            workspace="/home/domen/Projects/proj-a",
+            policy={"mode": mode,
+                    "allowed_scopes": ["/home/domen/Projects/proj-a"]},
+            protected_roots={"storage_user": root}, completion="process-exit",
+            session_id=session_id)
+        session.transition("mounting")
+        session.transition("running")
+        self.h.store.save(session)
+        return session
 
     def test_workspace_write_auto_commits(self):
         session = run_session(self.h.config(
@@ -129,6 +152,50 @@ class TestRunSession(unittest.TestCase):
             ["sh", "-c", "echo partial > p.txt; exit 3"]))
         self.assertEqual(session.exit_status, 3)
         self.assertEqual(session.state, "auto-committed")
+
+    def test_resume_running_session_reuses_existing_branch(self):
+        class NoCreateOnResume(FakeBranchFS):
+            def __init__(self):
+                super(NoCreateOnResume, self).__init__()
+                self.create_calls = 0
+
+            def create_branch(self, root, parent="main"):
+                self.create_calls += 1
+                raise AssertionError("resume must not create a new branch")
+
+        self.h.backend = NoCreateOnResume()
+        session = self.running_session(
+            command=["sh", "-c", "echo resumed > resumed.txt"])
+
+        resumed = resume_session(session.session_id,
+                                 self.h.config(session.agent_command))
+
+        self.assertEqual(resumed.state, "auto-committed")
+        self.assertEqual(self.h.backend.create_calls, 0)
+        committed = os.path.join(self.h.base, "Projects", "proj-a",
+                                 "resumed.txt")
+        self.assertTrue(os.path.isfile(committed))
+
+    def test_resume_custom_command_is_one_shot_and_preserves_original_exec(self):
+        original = ["sh", "-c", "echo original > original.txt"]
+        session = self.running_session(session_id="agent-resume-custom",
+                                       command=original)
+
+        resumed = resume_session(
+            session.session_id,
+            self.h.config(["sh", "-c", "echo custom > custom.txt"],
+                          agent_kind="command"))
+
+        self.assertEqual(resumed.state, "auto-committed")
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.h.base, "Projects", "proj-a", "custom.txt")))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.h.base, "Projects", "proj-a", "original.txt")))
+        persisted = self.h.store.load(session.session_id)
+        self.assertEqual(persisted.agent_command, original)
+        self.assertTrue(any(e["event"] == "resume-command"
+                            and "custom.txt" in e.get("detail", "")
+                            for e in persisted.events))
 
     def test_review_artifacts_written(self):
         session = run_session(self.h.config(

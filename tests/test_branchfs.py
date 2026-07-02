@@ -83,6 +83,51 @@ class TestBranchfsCli(unittest.TestCase):
         self.assertIn("--storage", runner.calls[0])
         self.assertIn(self.root.store, runner.calls[0])
 
+    def test_start_daemon_accepts_socket_that_becomes_ready_after_cli_timeout(self):
+        class InternalTimeoutRunner(object):
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, argv):
+                self.calls.append(list(argv))
+                return 1, "", "Error: Daemon failed to start"
+
+        ready_checks = []
+
+        def daemon_ready(path):
+            ready_checks.append(path)
+            return len(ready_checks) >= 3
+
+        sleeps = []
+        runner = InternalTimeoutRunner()
+        cli = BranchfsCli(run=runner, timeout_seconds=10,
+                          daemon_ready=daemon_ready,
+                          sleep=lambda seconds: sleeps.append(seconds))
+
+        cli.start_daemon(self.root)
+
+        self.assertEqual(len(runner.calls), 1)
+        self.assertTrue(all(path.endswith("daemon.sock")
+                            for path in ready_checks))
+        self.assertTrue(sleeps)
+
+    def test_start_daemon_reports_socket_not_ready_after_internal_timeout(self):
+        class InternalTimeoutRunner(object):
+            def __call__(self, argv):
+                return 1, "", "Error: Daemon failed to start"
+
+        cli = BranchfsCli(run=InternalTimeoutRunner(), timeout_seconds=0,
+                          daemon_ready=lambda path: False,
+                          sleep=lambda seconds: None)
+
+        with self.assertRaises(BranchfsError) as ctx:
+            cli.start_daemon(self.root)
+
+        message = str(ctx.exception)
+        self.assertIn("Daemon failed to start", message)
+        self.assertIn("daemon.sock", message)
+        self.assertIn("not reachable", message)
+
     def test_create_branch_argv_has_no_mountpoint(self):
         runner = RecordingRunner()
         cli = BranchfsCli(run=runner)

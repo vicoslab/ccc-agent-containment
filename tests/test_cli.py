@@ -146,6 +146,31 @@ class TestMainRun(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    def make_running_session(self, session_id="agent-resume-cli", command=None,
+                             mode="workspace-auto"):
+        store = SessionStore(os.path.join(self.h.tmp, "state"))
+        root = ProtectedRoot(
+            name="storage_user", base=self.h.base,
+            store=os.path.join(self.h.tmp, "stores", "storage_user"),
+            branch=session_id,
+            mount=os.path.join(self.h.tmp, "state", session_id, "mounts",
+                               "storage_user"),
+            visible="/storage/user", home_subdir="")
+        os.makedirs(os.path.join(root.store, "branches", root.branch, "files"),
+                    exist_ok=True)
+        session = store.create(
+            owner="domen", agent_kind="codex",
+            agent_command=command or ["sh", "-c", "echo default > default.txt"],
+            workspace="/storage/user/Projects/proj-a",
+            policy={"mode": mode,
+                    "allowed_scopes": ["/storage/user/Projects/proj-a"]},
+            protected_roots={"storage_user": root}, completion="process-exit",
+            session_id=session_id)
+        session.transition("mounting")
+        session.transition("running")
+        store.save(session)
+        return session
+
     def test_contained_run_auto_commits(self):
         code = main_run([
             "--config", self.h.config_path,
@@ -525,6 +550,40 @@ class TestMainRun(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(seen["config"].agent_command, ["/bin/zsh"])
 
+    def test_resume_uses_stored_command_by_default(self):
+        session = self.make_running_session(
+            session_id="agent-resume-default",
+            command=["sh", "-c", "echo default > default.txt"])
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = main(["resume", "--config", self.h.config_path,
+                         session.session_id], env={})
+
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.h.base, self.h.workspace_rel, "default.txt")))
+        self.assertIn("resumed", stderr.getvalue())
+        self.assertIn(session.session_id, stderr.getvalue())
+
+    def test_resume_accepts_custom_command_after_separator(self):
+        original = ["sh", "-c", "echo original > original.txt"]
+        session = self.make_running_session(
+            session_id="agent-resume-custom-cli", command=original)
+
+        code = main(["resume", "--config", self.h.config_path,
+                     session.session_id, "--", "sh", "-c",
+                     "echo custom > custom.txt"], env={})
+
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.h.base, self.h.workspace_rel, "custom.txt")))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.h.base, self.h.workspace_rel, "original.txt")))
+        persisted = SessionStore(os.path.join(self.h.tmp, "state")).load(
+            session.session_id)
+        self.assertEqual(persisted.agent_command, original)
+
     def test_agent_option_sets_explicit_agent_kind(self):
         seen = {}
 
@@ -870,6 +929,14 @@ class TestShellCompletion(unittest.TestCase):
                 self.assertEqual(
                     self.complete(["ccc-agent", op, "agent-a"]),
                     ["agent-alpha"])
+
+    def test_resume_completes_session_ids_and_options(self):
+        self.assertEqual(
+            self.complete(["ccc-agent", "resume", "agent-a"]),
+            ["agent-alpha"])
+        matches = self.complete(["ccc-agent", "resume", "--"])
+        self.assertIn("--force", matches)
+        self.assertIn("--agent", matches)
 
     def test_session_completion_uses_config_flag_after_op(self):
         self.assertEqual(

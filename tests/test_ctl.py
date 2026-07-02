@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from ccc_agent import ctl
-from ccc_agent.branchfs import FakeBranchFS
+from ccc_agent.branchfs import BranchfsError, FakeBranchFS
 from ccc_agent.paths import AliasMap
 from ccc_agent.runner import RootSpec, RunnerConfig, run_session
 from ccc_agent.session import ProtectedRoot, SessionStore
@@ -114,6 +114,27 @@ class TestController(unittest.TestCase):
         out = io.StringIO()
         controller.diff(session.session_id, out=out)
         self.assertEqual(out.getvalue(), "")
+
+    def test_diff_live_status_failure_is_actionable_control_error(self):
+        session, _root = self.h.running_session(branch="agent-stale-running")
+
+        class BrokenStatus(FakeBranchFS):
+            def status(self, root):
+                raise BranchfsError(
+                    "/usr/local/bin/branchfs start-daemon failed (1): "
+                    "Error: Daemon failed to start")
+
+        controller = ctl.Controller(store=self.h.store,
+                                    backend=BrokenStatus(),
+                                    alias_map=self.h.alias_map)
+
+        with self.assertRaises(ctl.ControlError) as cm:
+            controller.diff(session.session_id, out=io.StringIO())
+
+        message = str(cm.exception)
+        self.assertIn("could not read live BranchFS status", message)
+        self.assertIn("ccc-agent resume %s" % session.session_id, message)
+        self.assertIn("Daemon failed to start", message)
 
     def test_diff_path_prints_unified_base_delta_diff(self):
         base_path = os.path.join(self.h.base, "Projects", "proj-a",

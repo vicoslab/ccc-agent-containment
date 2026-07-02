@@ -43,7 +43,8 @@ from .control import ControlError as ChannelError
 from .ctl import CHECK_REPAIR, Controller, ControlError
 from .paths import AliasMap
 from .runner import (ENV_CONTROL_SOCK, ENV_CONTROL_TOKEN, ENV_SESSION,
-                     RootSpec, RunnerConfig, run_session)
+                     ResumeError, RootSpec, RunnerConfig, resume_session,
+                     run_session)
 from .session import SessionStore
 
 CONFIG_ENV = "CCC_AGENT_CONFIG"
@@ -160,6 +161,21 @@ def _write_session_start_banner(session, alias_map, confinement, stream=None):
         stream.write(
             "ccc-agent: dropped into new contained BranchFS environment\n")
     stream.write("ccc-agent: session: %s\n" % session.session_id)
+    for _name, root in sorted(session.protected_roots.items()):
+        stream.write(
+            "ccc-agent: serving visible %s from BranchFS view %s\n"
+            % (alias_map.canonicalize(root.visible), root.mount))
+
+
+def _write_session_resume_banner(session, alias_map, confinement, stream=None):
+    """Print the human-facing handoff banner before a resumed command starts."""
+    stream = sys.stderr if stream is None else stream
+    stream.write("ccc-agent: resumed BranchFS session %s\n"
+                 % session.session_id)
+    if confinement == "none":
+        stream.write(
+            "ccc-agent: WARNING confinement=none is NOT a security boundary "
+            "(debug only); the agent can write outside the view.\n")
     for _name, root in sorted(session.protected_roots.items()):
         stream.write(
             "ccc-agent: serving visible %s from BranchFS view %s\n"
@@ -480,6 +496,123 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
     return 0
 
 
+def _print_failure_details(store, session, verbose=False):
+    """Print failure diagnostics shared by run/resume."""
+    errors = [e for e in session.events if e.get("event") == "error"]
+    if session.state == "failed":
+        if errors:
+            for e in errors:
+                sys.stderr.write("ccc-agent: error: %s\n"
+                                 % e.get("detail", "(no detail recorded)"))
+        else:
+            sys.stderr.write("ccc-agent: failed but no error detail was "
+                             "recorded; see the event log (-v) below\n")
+    if verbose:
+        sys.stderr.write("ccc-agent: event log:\n")
+        for e in session.events:
+            line = "  %s  %s" % (e.get("time", ""), e.get("event", ""))
+            if e.get("detail") is not None:
+                line += ": %s" % e["detail"]
+            sys.stderr.write(line + "\n")
+    if session.state == "failed":
+        sys.stderr.write(
+            "ccc-agent: full record: %s\n"
+            "ccc-agent: inspect with: ccc-agent show %s\n"
+            % (store.session_file(session.session_id), session.session_id))
+
+
+def main_resume(argv=None, env=None, prog="ccc-agent resume"):
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        description="Resume a running BranchFS session after a crash/reboot.")
+    parser.add_argument("--config", help="path to config.json")
+    parser.add_argument("--agent", default=None,
+                        help="agent kind label for the resumed command")
+    parser.add_argument("--force", action="store_true",
+                        help="resume even if the old session mount still "
+                             "appears active (use only after verifying no old "
+                             "agent process is using it)")
+    parser.add_argument("--protect-agent-state", action="store_true",
+                        help="keep ~/.codex, ~/.claude, and ~/.hermes inside "
+                             "BranchFS review instead of the default shared "
+                             "direct runtime bind")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="print the full session event log")
+    parser.add_argument("session_id", metavar="session-id")
+    parser.add_argument("command", nargs=argparse.REMAINDER,
+                        help="-- command to run (default: stored command)")
+    args = parser.parse_args(argv)
+
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    custom_command = bool(command)
+
+    config = load_config(args.config, env=env)
+    store, backend, alias_map, user, roots = build_runtime(config)
+    try:
+        existing = store.load(args.session_id)
+    except KeyError:
+        sys.stderr.write("ccc-agent: no such session: %s\n" % args.session_id)
+        return 1
+    if not command:
+        command = list(existing.agent_command)
+    agent_kind = args.agent
+    if agent_kind is None:
+        agent_kind = "command" if custom_command else existing.agent_kind
+
+    confinement = config.get("confinement", "bwrap")
+    runner_config = RunnerConfig(
+        store=store, backend=backend, alias_map=alias_map, owner=user,
+        agent_kind=agent_kind, agent_command=command,
+        workspace=existing.workspace, policy=existing.policy, roots=roots,
+        confinement=confinement,
+        bwrap_bin=config.get("bwrap_bin", "bwrap"),
+        bwrap_proc_mode=config.get("bwrap_proc_mode", "bind"),
+        bwrap_ro_binds=config.get("bwrap_ro_binds", ()),
+        bwrap_setenv=config.get("bwrap_setenv"),
+        cred_mounts=config.get("cred_mounts", ()),
+        cred_mask=config.get("cred_mask", ()),
+        cred_env=config.get("cred_env"),
+        bwrap_uid=config.get("bwrap_uid"),
+        bwrap_gid=config.get("bwrap_gid"),
+        agent_plugins=({} if config.get("agent_hook_mode") == "disabled"
+                       else config.get("agent_plugins")),
+        agent_state_binds=config.get("agent_state_binds"),
+        protect_agent_state=(args.protect_agent_state or
+                             bool(config.get("protect_agent_state", False))),
+        ensure_agent_state_dirs=bool(config.get("ensure_agent_state_dirs", False)),
+        on_session_start=lambda session: _write_session_resume_banner(
+            session, alias_map, confinement))
+    try:
+        session = resume_session(args.session_id, runner_config, env=env,
+                                 force=args.force)
+    except ResumeError as exc:
+        sys.stderr.write("ccc-agent: %s\n" % exc)
+        return 1
+
+    sys.stderr.write("ccc-agent: resumed session %s finished: %s\n"
+                     % (session.session_id,
+                        _finish_state_label(store, session)))
+    _print_failure_details(store, session, verbose=args.verbose)
+
+    if session.state == "pending-review":
+        session = _handle_pending_review_finish(store, backend, alias_map,
+                                                session)
+    if session.state == "pending-review":
+        sys.stderr.write(
+            "ccc-agent: review with: ccc-agent diff %s\n"
+            "ccc-agent: file diff: ccc-agent diff %s <path>\n"
+            "ccc-agent: then: ccc-agent commit %s | ccc-agent abort %s\n"
+            % (session.session_id, session.session_id, session.session_id,
+               session.session_id))
+    if session.state == "failed":
+        return 1
+    if session.exit_status not in (0, None):
+        return session.exit_status
+    return 0
+
+
 def _ctl_socket(args, env):
     """Per-turn control ops that run from INSIDE the sandbox.  They reach the
     supervisor over the control socket (CCC_AGENT_CONTROL_SOCK/TOKEN) — the
@@ -717,19 +850,24 @@ _CTL_OPS = (set(_SESSION_ID_CTL_OPS) | {
     "list", "cleanup", "diff", "review", "finalize-turn", "approve-turn",
 })
 _SESSION_ID_COMPLETION_OPS = (
-    set(_SESSION_ID_CTL_OPS) | {"diff", "review", "list"}
+    set(_SESSION_ID_CTL_OPS) | {"diff", "review", "list", "resume"}
 )
 _MULTI_SESSION_ID_COMPLETION_OPS = set(_BATCH_SESSION_ID_CTL_OPS)
 _MAIN_OPS = tuple(sorted(_CTL_OPS | {
-    "run", "launch", "setup", "softsandbox", "completion",
+    "run", "launch", "resume", "setup", "softsandbox", "completion",
 }))
 _TOP_LEVEL_OPTIONS = ("--config", "--version", "--help")
 _GLOBAL_VALUE_OPTIONS = frozenset(("--config",))
 _CLEANUP_VALUE_OPTIONS = frozenset(("--older-than",))
 _REVIEW_VALUE_OPTIONS = frozenset(("--commit", "--apply-patch"))
+_RESUME_VALUE_OPTIONS = frozenset(("--agent",))
 _CLEANUP_OPTIONS = ("--older-than", "--dry-run", "--config", "--help")
 _REVIEW_OPTIONS = (
     "--accept", "--reject", "--commit", "--emit-patch", "--apply-patch",
+    "--config", "--help",
+)
+_RESUME_OPTIONS = (
+    "--agent", "--force", "--protect-agent-state", "--verbose", "-v",
     "--config", "--help",
 )
 
@@ -811,6 +949,8 @@ def _value_options_for_completion(op):
         values.update(_CLEANUP_VALUE_OPTIONS)
     if op == "review":
         values.update(_REVIEW_VALUE_OPTIONS)
+    if op == "resume":
+        values.update(_RESUME_VALUE_OPTIONS)
     return values
 
 
@@ -841,6 +981,8 @@ def _options_for_completion(op):
         return _CLEANUP_OPTIONS
     if op == "review":
         return _REVIEW_OPTIONS
+    if op == "resume":
+        return _RESUME_OPTIONS
     if op in _CTL_OPS or op in ("run", "launch", "setup", "softsandbox",
                                 "completion"):
         return ("--config", "--help")
@@ -931,6 +1073,8 @@ def _print_main_help(stream=None):
         "Primary ops:\n"
         "  run              run a command, or the current shell when omitted, "
         "in a contained BranchFS session\n"
+        "  resume           re-mount and continue a running session after a "
+        "crash/reboot\n"
         "  setup            write config, plugin entries, and optional shims\n"
         "  completion       print shell completion code (bash, zsh, fish)\n"
         "  softsandbox      diagnostic non-FUSE soft sandbox helper\n\n"
@@ -939,6 +1083,8 @@ def _print_main_help(stream=None):
         "  finish-turn, check-before-final, finalize-turn, approve-turn\n\n"
         "Examples:\n"
         "  ccc-agent run --workspace /home/$USER/project -- codex exec 'fix bug'\n"
+        "  ccc-agent resume <session>             # rerun the stored command\n"
+        "  ccc-agent resume <session> -- bash     # resume with a custom shell\n"
         "  ccc-agent list\n"
         "  ccc-agent cleanup --older-than 30 --dry-run\n"
         "  ccc-agent review <session> --accept\n"
@@ -962,6 +1108,8 @@ def main(argv=None, env=None):
         return main_completion(rest, prog="ccc-agent completion")
     if op in ("run", "launch"):
         return main_run(rest, env=env, prog="ccc-agent %s" % op)
+    if op == "resume":
+        return main_resume(rest, env=env, prog="ccc-agent resume")
     if op == "setup":
         from . import setup as setup_mod
         return setup_mod.main(rest, prog="ccc-agent setup")

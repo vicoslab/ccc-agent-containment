@@ -63,6 +63,23 @@ class Controller(object):
                 % (action, session.session_id, session.state,
                    ", ".join(allowed)))
 
+    def _live_status(self, session, root, action="status"):
+        try:
+            return self.backend.status(root)
+        except Exception as exc:
+            hint = ""
+            if session.state in ("mounting", "running", "finalizing"):
+                hint = (
+                    "; session is marked %s. If the node rebooted or the "
+                    "agent process is gone, use `ccc-agent resume %s` to "
+                    "re-mount and continue, or `ccc-agent finish %s` to "
+                    "finalize after verifying no old process is still running"
+                    % (session.state, session.session_id, session.session_id))
+            raise ControlError(
+                "could not read live BranchFS status for session %s root %s "
+                "while running %s: %s%s"
+                % (session.session_id, root.name, action, exc, hint))
+
     def _mount_still_active(self, root):
         try:
             return os.path.ismount(root.mount)
@@ -176,7 +193,7 @@ class Controller(object):
         session = self._load(session_id)
         for name, root in sorted(session.protected_roots.items()):
             out.write("# root %s (branch %s)\n" % (name, root.branch))
-            for change in self.backend.status(root):
+            for change in self._live_status(session, root, action="status"):
                 out.write("%s %s (%s, %d bytes)\n"
                           % (change.op, change.path, change.kind,
                              change.bytes))
@@ -337,7 +354,7 @@ class Controller(object):
         out = []
         config = PolicyConfig.from_dict(session.policy)
         for _name, root in sorted(session.protected_roots.items()):
-            changes = self.backend.status(root)
+            changes = self._live_status(session, root, action="review")
             if not include_ignored:
                 changes = filter_ignored(changes, config, self.alias_map)
             for change in changes:
@@ -468,7 +485,8 @@ class Controller(object):
         config = PolicyConfig.from_dict(session.policy)
         changes = []
         for _name, root in sorted(session.protected_roots.items()):
-            changes.extend(self.backend.status(root))
+            changes.extend(self._live_status(session, root,
+                                            action="check-before-final"))
         changes = filter_ignored(changes, config, self.alias_map)
         out_of_scope, deny_matches = classify(changes, config, self.alias_map)
 

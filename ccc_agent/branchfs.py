@@ -13,7 +13,9 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
+import time
 
 from .policy import Change
 
@@ -27,6 +29,21 @@ class BranchfsError(Exception):
 
 def _branch_dir(root):
     return os.path.join(root.store, "branches", root.branch)
+
+
+def _daemon_socket(root):
+    return os.path.join(root.store, "daemon.sock")
+
+
+def _unix_socket_ready(path):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
 
 
 def _remove_empty_orphan_branch_dir(root):
@@ -120,9 +137,12 @@ class BranchfsCli(object):
     """Drives the branchfs CLI; one daemon per protected root (per store)."""
 
     def __init__(self, binary="branchfs", run=None,
-                 timeout_seconds=DEFAULT_BRANCHFS_TIMEOUT_SECONDS):
+                 timeout_seconds=DEFAULT_BRANCHFS_TIMEOUT_SECONDS,
+                 daemon_ready=None, sleep=None):
         self.binary = binary
         self.timeout_seconds = timeout_seconds
+        self._daemon_ready = daemon_ready or _unix_socket_ready
+        self._sleep = sleep or time.sleep
         if run is None:
             self._run = lambda argv: _run_subprocess(
                 argv, timeout=self.timeout_seconds)
@@ -137,12 +157,40 @@ class BranchfsCli(object):
                                    err.strip() or out.strip()))
         return out
 
+    def _wait_for_daemon_socket(self, root, deadline):
+        socket_path = _daemon_socket(root)
+        while time.monotonic() < deadline:
+            if self._daemon_ready(socket_path):
+                return True
+            self._sleep(0.1)
+        return self._daemon_ready(socket_path)
+
     def start_daemon(self, root):
         # Idempotent: the daemon auto-exits when its last mount goes away,
         # so every daemon-dependent operation re-ensures it first (e.g.
         # `ccc-agent commit` long after the agent session unmounted).
-        self._invoke("start-daemon", "--base", root.base,
-                     "--storage", root.store)
+        started_at = time.monotonic()
+        try:
+            self._invoke("start-daemon", "--base", root.base,
+                         "--storage", root.store)
+        except BranchfsError as exc:
+            # BranchFS itself has a short internal readiness wait.  On a cold
+            # node restart with an existing/large store, the child daemon may be
+            # alive but still scanning/loading state when the parent CLI returns
+            # "Daemon failed to start".  Do not spawn more daemons immediately;
+            # poll the store socket until ccc-agent's own timeout budget expires.
+            if "Daemon failed to start" not in str(exc):
+                raise
+            deadline = started_at + float(self.timeout_seconds)
+            if self._wait_for_daemon_socket(root, deadline):
+                return
+            raise BranchfsError(
+                "%s; daemon socket %s was not reachable within ccc-agent's "
+                "%s timeout. The BranchFS child may have exited before "
+                "binding its socket, or startup may still be slower than the "
+                "configured branchfs_timeout_seconds."
+                % (exc, _daemon_socket(root),
+                   _format_timeout_seconds(self.timeout_seconds)))
 
     def create_branch(self, root, parent="main"):
         self.start_daemon(root)
