@@ -173,8 +173,13 @@ def build_agent_plugins(home, src_dir=None):
 
 def build_agent_state_binds(home):
     """Default shared direct state for agent tools, outside BranchFS."""
-    return [os.path.join(home, name)
-            for name in (".codex", ".claude", ".hermes")]
+    paths = (
+        ".codex", ".claude", ".hermes",
+        ".claude.json",
+        ".local/share/claude", ".local/state/claude",
+        ".cache/claude-cli-nodejs",
+    )
+    return [os.path.join(home, path) for path in paths]
 
 
 def build_config(mode, user, home, branchfs_bin, bwrap_bin, state_dir,
@@ -240,19 +245,23 @@ def build_config(mode, user, home, branchfs_bin, bwrap_bin, state_dir,
         "_runtime_comment": "Re-expose the agent binary/runtime read-only at a "
                             "NON-view dest (e.g. '/path/to/agent:/opt/agent').",
         "bwrap_ro_binds": [],
-        "_agent_state_comment": "By default ~/.codex, ~/.claude, and ~/.hermes "
-                                "are shared rw system state, direct-bound over "
-                                "the BranchFS home view and never committed or "
-                                "rolled back by ccc-agent. Codex/Claude/Hermes "
-                                "own their own concurrent access. Set "
+        "_agent_state_comment": "By default Codex/Hermes state plus Claude "
+                                "Code state (~/.claude, ~/.claude.json, "
+                                "~/.local/share/claude, ~/.local/state/claude, "
+                                "and ~/.cache/claude-cli-nodejs) are shared rw "
+                                "system state, direct-bound over the BranchFS "
+                                "home view and never committed or rolled back "
+                                "by ccc-agent. Codex/Claude/Hermes own their "
+                                "own concurrent access. Set "
                                 "protect_agent_state=true or run with "
-                                "--protect-agent-state to keep these dirs in "
+                                "--protect-agent-state to keep these paths in "
                                 "BranchFS review instead.",
         "protect_agent_state": False,
         "ensure_agent_state_dirs": True,
         "agent_state_binds": build_agent_state_binds(home),
-        "_cred_comment": "Agent config/state dirs such as ~/.codex, "
-                         "~/.claude, and ~/.hermes are direct shared rw "
+        "_cred_comment": "Agent config/state paths such as ~/.codex, "
+                         "~/.claude, ~/.claude.json, Claude .local state, "
+                         "Claude cache, and ~/.hermes are direct shared rw "
                          "agent_state_binds by default, so real agents can "
                          "create logs, sessions, caches, config, and refreshed "
                          "tokens without BranchFS merge policy. Use cred_mounts "
@@ -305,9 +314,9 @@ def main(argv=None, prog="ccc-agent setup"):
                         help="omit the confined-only CCC agent plugin entries "
                              "(--no-hooks kept as a deprecated alias)")
     parser.add_argument("--protect-agent-state", action="store_true",
-                        help="generate config with ~/.codex, ~/.claude, and "
-                             "~/.hermes kept inside BranchFS review instead "
-                             "of direct shared rw binds")
+                        help="generate config with Codex/Hermes state and "
+                             "Claude Code runtime paths kept inside "
+                             "BranchFS review instead of direct shared rw binds")
     parser.add_argument("--enable-shims", action="store_true",
                         help="symlink the transparent agent PATH shims")
     parser.add_argument("--shim-agents", default="codex claude hermes opencode")

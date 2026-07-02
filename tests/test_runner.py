@@ -577,6 +577,151 @@ class TestBwrapConfinement(unittest.TestCase):
         self.assertGreater(codex_state, home_view)
         self.assertGreater(plugin_bind, codex_state)
 
+    def test_default_agent_state_binds_include_claude_code_runtime_paths(self):
+        cfg = self._bwrap_config(["claude"], agent_kind="claude")
+
+        self.assertIn("/home/domen/.codex", cfg.agent_state_binds)
+        self.assertIn("/home/domen/.claude", cfg.agent_state_binds)
+        self.assertIn("/home/domen/.hermes", cfg.agent_state_binds)
+        self.assertIn("/home/domen/.claude.json", cfg.agent_state_binds)
+        self.assertIn("/home/domen/.local/share/claude",
+                      cfg.agent_state_binds)
+        self.assertIn("/home/domen/.local/state/claude",
+                      cfg.agent_state_binds)
+        self.assertIn("/home/domen/.cache/claude-cli-nodejs",
+                      cfg.agent_state_binds)
+
+    def test_ensure_agent_state_dirs_skips_claude_json_file_path(self):
+        home = os.path.join(self._tmp.name, "home", "domen")
+        binds = [
+            os.path.join(home, ".claude"),
+            os.path.join(home, ".claude.json"),
+            os.path.join(home, ".local", "share", "claude"),
+            os.path.join(home, ".local", "state", "claude"),
+            os.path.join(home, ".cache", "claude-cli-nodejs"),
+        ]
+
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            run_session(self._bwrap_config(
+                ["claude"], agent_kind="claude", agent_state_binds=binds,
+                ensure_agent_state_dirs=True))
+
+        self.assertTrue(os.path.isdir(os.path.join(home, ".claude")))
+        self.assertFalse(os.path.exists(os.path.join(home, ".claude.json")))
+        self.assertTrue(os.path.isdir(os.path.join(home, ".local", "share",
+                                                  "claude")))
+        self.assertTrue(os.path.isdir(os.path.join(home, ".local", "state",
+                                                  "claude")))
+        self.assertTrue(os.path.isdir(os.path.join(home, ".cache",
+                                                  "claude-cli-nodejs")))
+
+    def test_bwrap_shared_agent_state_binds_claude_file_and_runtime_dirs(self):
+        state = os.path.join(self._tmp.name, "real-agent-state")
+        claude_home = os.path.join(state, ".claude")
+        claude_json = os.path.join(state, ".claude.json")
+        share = os.path.join(state, ".local", "share", "claude")
+        local_state = os.path.join(state, ".local", "state", "claude")
+        cache = os.path.join(state, ".cache", "claude-cli-nodejs")
+        for path in (claude_home, share, local_state, cache):
+            os.makedirs(path)
+        with open(claude_json, "w") as fh:
+            fh.write("{}\n")
+
+        binds = [
+            claude_home + ":/home/domen/.claude",
+            claude_json + ":/home/domen/.claude.json",
+            share + ":/home/domen/.local/share/claude",
+            local_state + ":/home/domen/.local/state/claude",
+            cache + ":/home/domen/.cache/claude-cli-nodejs",
+            os.path.join(state, "missing.json") + ":/home/domen/.missing.json",
+        ]
+
+        argv = self._capture_argv(["claude"], "claude", {},
+                                  agent_state_binds=binds)
+
+        triples = [(argv[k], argv[k + 1], argv[k + 2])
+                   for k in range(len(argv) - 2)]
+        self.assertIn(("--bind", claude_home, "/home/domen/.claude"), triples)
+        self.assertIn(("--bind", claude_json, "/home/domen/.claude.json"), triples)
+        self.assertIn(("--bind", share, "/home/domen/.local/share/claude"), triples)
+        self.assertIn(("--bind", local_state, "/home/domen/.local/state/claude"), triples)
+        cache_dest = os.path.realpath("/home/domen/.cache/claude-cli-nodejs")
+        self.assertIn(("--bind", cache, cache_dest), triples)
+        self.assertNotIn("/home/domen/.missing.json", argv)
+
+    def test_claude_runtime_deltas_are_ignored_when_optional_binds_missing(self):
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0)
+
+        def claude_runtime_delta(session):
+            root = session.protected_roots["storage_user"]
+            files = {
+                os.path.join(".claude", "settings.json"): "{}\n",
+                ".claude.json": "{}\n",
+                os.path.join(".local", "share", "claude", "versions",
+                             "v1", "node"): "runtime\n",
+                os.path.join(".local", "state", "claude", "locks",
+                             "pid.lock"): "lock\n",
+                os.path.join(".cache", "claude-cli-nodejs", "npm.log"):
+                    "log\n",
+            }
+            for rel, data in files.items():
+                path = os.path.join(root.mount, rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as fh:
+                    fh.write(data)
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self._bwrap_config(
+                ["claude"], agent_kind="claude", agent_state_binds=[]),
+                before_finalize=claude_runtime_delta)
+
+        self.assertEqual(session.state, "auto-committed")
+        self.assertIn("/storage/user/.claude",
+                      session.policy["ignore_patterns"])
+        self.assertIn("/storage/user/.claude.json",
+                      session.policy["ignore_patterns"])
+        self.assertIn("/storage/user/.local/share/claude",
+                      session.policy["ignore_patterns"])
+        self.assertIn("/storage/user/.local/state/claude",
+                      session.policy["ignore_patterns"])
+        self.assertIn("/storage/user/.cache/claude-cli-nodejs",
+                      session.policy["ignore_patterns"])
+        self.assertFalse(os.path.exists(os.path.join(self.h.base,
+                                                     ".claude")))
+        self.assertFalse(os.path.exists(os.path.join(self.h.base,
+                                                     ".claude.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.h.base,
+                                                     ".local", "share",
+                                                     "claude")))
+
+    def test_claude_runtime_ignores_do_not_hide_neighbor_local_data(self):
+        def fake_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0)
+
+        def neighbor_delta(session):
+            root = session.protected_roots["storage_user"]
+            path = os.path.join(root.mount, ".local", "share", "project",
+                                "data.txt")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("deliverable\n")
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            session = run_session(self._bwrap_config(
+                ["claude"], agent_kind="claude", agent_state_binds=[]),
+                before_finalize=neighbor_delta)
+
+        self.assertEqual(session.state, "pending-review")
+        with open(os.path.join(self.h.store.review_dir(session.session_id),
+                               "policy-decision.json")) as fh:
+            decision = json.load(fh)
+        self.assertIn("/storage/user/.local/share/project/data.txt",
+                      decision["out_of_scope"])
+
     def test_bwrap_shared_agent_state_bind_resolves_symlink_destination(self):
         target = os.path.join(self._tmp.name, "real-storage", "domen", ".claude")
         os.makedirs(target)

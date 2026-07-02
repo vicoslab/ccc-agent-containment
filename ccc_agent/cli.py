@@ -382,9 +382,9 @@ def main_run(argv=None, env=None, prog="ccc-agent run"):
     parser.add_argument("--agent", default="command",
                         help="agent kind label, e.g. codex, claude, hermes")
     parser.add_argument("--protect-agent-state", action="store_true",
-                        help="keep ~/.codex, ~/.claude, and ~/.hermes inside "
-                             "BranchFS review instead of the default shared "
-                             "direct runtime bind")
+                        help="keep Codex/Hermes state and Claude Code runtime "
+                             "paths inside BranchFS review instead of the "
+                             "default shared direct runtime bind")
     parser.add_argument("--full-isolation", action="store_true",
                         help="do not bind the existing container /run into "
                              "the bwrap sandbox; restores the stricter "
@@ -543,9 +543,9 @@ def main_resume(argv=None, env=None, prog="ccc-agent resume"):
                              "appears active (use only after verifying no old "
                              "agent process is using it)")
     parser.add_argument("--protect-agent-state", action="store_true",
-                        help="keep ~/.codex, ~/.claude, and ~/.hermes inside "
-                             "BranchFS review instead of the default shared "
-                             "direct runtime bind")
+                        help="keep Codex/Hermes state and Claude Code runtime "
+                             "paths inside BranchFS review instead of the "
+                             "default shared direct runtime bind")
     parser.add_argument("--full-isolation", action="store_true",
                         help="do not bind the existing container /run into "
                              "the bwrap sandbox; restores the stricter "
